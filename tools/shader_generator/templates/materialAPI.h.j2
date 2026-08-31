@@ -1,0 +1,48 @@
+#pragma once
+
+/**
+ * @brief {{ shader_name }} DLL Export Interface
+ *
+ * The DLL exports registration functions that receive function pointers
+ * from the host application. This avoids shared singleton issues across
+ * DLL boundaries.
+ */
+
+#include <string>
+#include <any>
+#include <cstdint>
+
+#ifdef {{ export_macro }}_EXPORTS
+#define {{ export_macro }}_API __declspec(dllexport)
+#elif !defined(RT_RUNTIME)
+#define {{ export_macro }}_API
+#else
+#define {{ export_macro }}_API __declspec(dllimport)
+#endif
+
+/// Function pointer: register a callable by name, returns type ID.
+/// Host provides this — the DLL calls it for each custom callable.
+using {{ export_macro }}_RegisterFn = std::uint32_t(*)(const char* name, std::any resolve);
+
+/// Function pointer: clear all custom callables.
+using {{ export_macro }}_ClearFn = void(*)();
+
+extern "C" {
+
+/**
+ * @brief Register custom material callables via host-provided function pointers.
+ *
+ * @param registerFn  Host function to register a callable (returns type ID)
+ * @param clearFn     Host function to clear all custom callables
+ */
+{{ export_macro }}_API void registerMaterialCallables(
+    {{ export_macro }}_RegisterFn registerFn, {{ export_macro }}_ClearFn clearFn);
+
+/**
+ * @brief Clear custom callables (called before DLL unload).
+ *
+ * @param clearFn Host function to clear all custom callables
+ */
+{{ export_macro }}_API void unregisterMaterialCallables({{ export_macro }}_ClearFn clearFn);
+
+} // extern "C"

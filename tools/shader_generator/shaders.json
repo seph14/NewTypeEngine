@@ -1,0 +1,34 @@
+{
+  "shaders": [
+    {
+      "name": "PathTracer",
+      "class_name": "PathTracerShader",
+      "export_macro": "PATH_TRACER",
+      "directory": "runtime_shaders/PathTracerShader"
+    },
+    {
+      "name": "Demo",
+      "class_name": "DemoShader",
+      "export_macro": "DEMO",
+      "directory": "runtime_shaders/DemoShader"
+    },
+    {
+      "name": "SimpleTest",
+      "class_name": "SimpleTestShader",
+      "export_macro": "SIMPLETEST",
+      "directory": "runtime_shaders/SimpleTestShader"
+    },
+    {
+      "name": "TestNew",
+      "class_name": "TestNewShader",
+      "export_macro": "TESTNEW",
+      "directory": "runtime_shaders/TestNewShader"
+    },
+    {
+      "name": "TestGen",
+      "class_name": "TestGenShader",
+      "export_macro": "TESTGEN",
+      "directory": "runtime_shaders/TestGenShader"
+    }
+  ]
+}

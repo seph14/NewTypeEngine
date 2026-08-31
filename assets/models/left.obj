@@ -1,0 +1,16 @@
+# File exported by Houdini 20.0.688 (www.sidefx.com)
+# 4 points
+# 4 vertices
+# 1 primitives
+# Bounds: [-1, -1, -1] to [-1, 1, 1]
+g 
+v -1 -1 1
+v -1 1 1
+v -1 -1 -1
+v -1 1 -1
+vn 1 -0 -0
+vn 1 -0 -0
+vn 1 0 0
+vn 1 -0 -0
+g left
+f 1//1 3//2 4//3 2//4

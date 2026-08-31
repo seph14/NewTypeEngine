@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Engine-wide MSBuild properties template.
+
+  Used by tools/generate_project.py for freshly-generated user projects.
+  Contains only the core engine dependencies (Cinder + LuisaCompute + Cling
+  placeholder + PlatformToolset). Optional features like LuisaComputeSimulator
+  (sim addon) and the D3D11 to D3D12 video bridge (video addon) are NOT
+  baked in here. Install them via tools/cinder_blocks.py with the project
+  flag pointing at the consumer project root:
+
+      python tools/cinder_blocks.py add sim       (with the project flag)
+      python tools/cinder_blocks.py add video     (with the project flag)
+      python tools/cinder_blocks.py add directml  (with the project flag)
+
+  The engine's own dev project at vc2022/NewTypeEngine.props may carry
+  extra machine-local entries (e.g. LCS wired in directly); those do NOT
+  belong here. Keep this file minimal and addon-friendly.
+-->
+<Project>
+  <PropertyGroup>
+    <!-- Cinder Paths -->
+    <CinderRoot>..\..\Cinder</CinderRoot>
+    <CinderInclude>$(CinderRoot)\include</CinderInclude>
+    <CinderIncludeAngle>$(CinderRoot)\include\ANGLE</CinderIncludeAngle>
+    <CinderLibDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143\cinder.lib</CinderLibDebug>
+    <CinderLibRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143\cinder.lib</CinderLibRelease>
+    <CinderBinDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143</CinderBinDebug>
+    <CinderBinRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143</CinderBinRelease>
+
+    <!-- LuisaCompute Paths -->
+    <LuisaComputeRoot>..\..\LuisaCompute</LuisaComputeRoot>
+    <LuisaComputeInclude>$(LuisaComputeRoot)\include</LuisaComputeInclude>
+    <LuisaComputeSpdlog>$(LuisaComputeRoot)\src\ext\spdlog\include</LuisaComputeSpdlog>
+    <LuisaComputeXxHash>$(LuisaComputeRoot)\src\ext\xxHash</LuisaComputeXxHash>
+    <LuisaComputeMagicEnum>$(LuisaComputeRoot)\src\ext\magic_enum\include</LuisaComputeMagicEnum>
+    <LuisaComputeEASTL>$(LuisaComputeRoot)\src\ext\EASTL\include</LuisaComputeEASTL>
+    <LuisaComputeEABase>$(LuisaComputeRoot)\src\ext\EASTL\packages\EABase\include\Common</LuisaComputeEABase>
+    <LuisaComputeReproc>$(LuisaComputeRoot)\src\ext\reproc\reproc\include</LuisaComputeReproc>
+    <LuisaComputeReprocXX>$(LuisaComputeRoot)\src\ext\reproc\reproc++\include</LuisaComputeReprocXX>
+    <LuisaComputeMarl>$(LuisaComputeRoot)\src\ext\marl\include</LuisaComputeMarl>
+    <LuisaComputeHalf>$(LuisaComputeRoot)\src\ext\half\include</LuisaComputeHalf>
+    <LuisaComputeStb>$(LuisaComputeRoot)\src\ext\stb</LuisaComputeStb>
+    <!--
+    <LuisaComputeLibDebug>$(LuisaComputeRoot)\build-cuda\lib\Debug\</LuisaComputeLibDebug>
+    <LuisaComputeLibRelease>$(LuisaComputeRoot)\build-cuda\lib\Release\</LuisaComputeLibRelease>
+    <LuisaComputeBinDebug>$(LuisaComputeRoot)\build-cuda\bin\Debug</LuisaComputeBinDebug>
+    <LuisaComputeBinRelease>$(LuisaComputeRoot)\build-cuda\bin\Release</LuisaComputeBinRelease>
+    -->
+    <LuisaComputeLibDebug>$(LuisaComputeRoot)\build-dx-debug\lib\</LuisaComputeLibDebug>
+    <LuisaComputeLibRelease>$(LuisaComputeRoot)\build-dx\lib\</LuisaComputeLibRelease>
+    <LuisaComputeBinDebug>$(LuisaComputeRoot)\build-dx-debug\bin</LuisaComputeBinDebug>
+    <LuisaComputeBinRelease>$(LuisaComputeRoot)\build-dx\bin</LuisaComputeBinRelease>
+
+    <!-- Platform Toolset -->
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+</Project>

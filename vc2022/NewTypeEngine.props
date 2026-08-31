@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <!-- Cinder Paths -->
+    <CinderRoot>..\..\Cinder</CinderRoot>
+    <CinderInclude>$(CinderRoot)\include</CinderInclude>
+    <CinderIncludeAngle>$(CinderRoot)\include\ANGLE</CinderIncludeAngle>
+    <CinderLibDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143\cinder.lib</CinderLibDebug>
+    <CinderLibRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143\cinder.lib</CinderLibRelease>
+    <CinderBinDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143</CinderBinDebug>
+    <CinderBinRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143</CinderBinRelease>
+
+    <!-- LuisaCompute Paths -->
+    <LuisaComputeRoot>..\..\LuisaCompute</LuisaComputeRoot>
+    <LuisaComputeInclude>$(LuisaComputeRoot)\include</LuisaComputeInclude>
+    <LuisaComputeSpdlog>$(LuisaComputeRoot)\src\ext\spdlog\include</LuisaComputeSpdlog>
+    <LuisaComputeXxHash>$(LuisaComputeRoot)\src\ext\xxHash</LuisaComputeXxHash>
+    <LuisaComputeMagicEnum>$(LuisaComputeRoot)\src\ext\magic_enum\include</LuisaComputeMagicEnum>
+    <LuisaComputeEASTL>$(LuisaComputeRoot)\src\ext\EASTL\include</LuisaComputeEASTL>
+    <LuisaComputeEABase>$(LuisaComputeRoot)\src\ext\EASTL\packages\EABase\include\Common</LuisaComputeEABase>
+    <LuisaComputeReproc>$(LuisaComputeRoot)\src\ext\reproc\reproc\include</LuisaComputeReproc>
+    <LuisaComputeReprocXX>$(LuisaComputeRoot)\src\ext\reproc\reproc++\include</LuisaComputeReprocXX>
+    <LuisaComputeMarl>$(LuisaComputeRoot)\src\ext\marl\include</LuisaComputeMarl>
+    <LuisaComputeHalf>$(LuisaComputeRoot)\src\ext\half\include</LuisaComputeHalf>
+    <LuisaComputeStb>$(LuisaComputeRoot)\src\ext\stb</LuisaComputeStb>
+    <!--
+    <LuisaComputeLibDebug>$(LuisaComputeRoot)\build-cuda\lib\Debug\</LuisaComputeLibDebug>
+    <LuisaComputeLibRelease>$(LuisaComputeRoot)\build-cuda\lib\Release\</LuisaComputeLibRelease>
+    <LuisaComputeBinDebug>$(LuisaComputeRoot)\build-cuda\bin\Debug</LuisaComputeBinDebug>
+    <LuisaComputeBinRelease>$(LuisaComputeRoot)\build-cuda\bin\Release</LuisaComputeBinRelease>
+    -->
+    <LuisaComputeLibDebug>$(LuisaComputeRoot)\build-dx-debug\lib\</LuisaComputeLibDebug>
+    <LuisaComputeLibRelease>$(LuisaComputeRoot)\build-dx\lib\</LuisaComputeLibRelease>
+    <LuisaComputeBinDebug>$(LuisaComputeRoot)\build-dx-debug\bin</LuisaComputeBinDebug>
+    <LuisaComputeBinRelease>$(LuisaComputeRoot)\build-dx\bin</LuisaComputeBinRelease>
+
+    <!-- LuisaComputeSimulator (physics) Paths -->
+    <LCSRoot>..\..\LuisaComputeSimulator</LCSRoot>
+    <LCSInclude>$(LCSRoot)\Solver</LCSInclude>
+    <LCSIncludeLcpp>$(LCSRoot)\ext\lcpp\src</LCSIncludeLcpp>
+    <LCSIncludeEigen>$(LCSRoot)\ext\eigen</LCSIncludeEigen>
+    <LCSIncludeYyjson>$(LCSRoot)\ext\embed_yyjson</LCSIncludeYyjson>
+    <LCSLibDebug>$(LCSRoot)\build-dx-debug\Debug</LCSLibDebug>
+    <LCSLibRelease>$(LCSRoot)\build-dx\Release</LCSLibRelease>
+    <!-- Suppress SolverInterface's built-in marl scheduler member so it
+         doesn't conflict with Pipeline's already-bound scheduler. Must be
+         set at consumer compile time because SolverInterface()'s ctor is
+         inline and gets emitted in every TU that constructs NewtonSolver. -->
+    <LCSNoInternalFiberScheduler>LCS_NO_INTERNAL_FIBER_SCHEDULER</LCSNoInternalFiberScheduler>
+
+    <!-- Platform Toolset -->
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+</Project>

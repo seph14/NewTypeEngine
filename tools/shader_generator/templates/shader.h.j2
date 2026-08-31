@@ -1,0 +1,65 @@
+#pragma once
+
+/**
+ * @brief {{ shader_name }} - Interface header
+ *
+ * In Runtime mode (RT_RUNTIME defined):
+ * - Shaders are loaded from external DLL
+ * - Interface only, implementation is in the DLL
+ *
+ * In Static mode (RT_RUNTIME not defined):
+ * - Shaders are statically linked
+ * - Implementation is included directly
+ */
+
+#include <luisa/luisa-compute.h>
+#include <luisa/dsl/sugar.h>
+#include "{{ shader_name }}API.h"
+#include "newtype/core/IShaderGenerator.h"
+
+{% if forward_declarations %}
+// Forward declarations
+{% for decl in forward_declarations %}
+{{ decl }}
+{% endfor %}
+{% endif %}
+
+/**
+ * @brief {{ description | default(shader_name + " shader with hot-reload support") }}
+ *
+ * In Debug_Runtime mode (RT_RUNTIME defined), changes to the shader code
+ * will trigger automatic recompilation and hot-reload via DLL.
+ *
+ * In Debug/Release mode, this is statically linked with zero overhead.
+ *
+ * Usage:
+ * @code
+ *   // In static mode
+ *   {{ class_name }} generator;
+ *   ShaderManager::instance().loadShader(generator);
+ *
+ *   // In runtime mode - DLL is loaded automatically
+ *   auto& shader = ShaderManager::instance().shader<2, {{ shader_name }}Type::Args...>("{{ function_suffix }}", args...);
+ * @endcode
+ */
+class {{ class_name }} : public newtype::core::IShaderGenerator<2> {
+public:
+    // Shader type alias - matches the DLL export
+    using ShaderType = {{ shader_name }}Type;
+
+    {{ class_name }}() = default;
+    ~{{ class_name }}() override = default;
+
+    // IShaderGenerator interface
+    [[nodiscard]] std::string getName() const override { return "{{ function_suffix }}"; }
+    [[nodiscard]] std::string getTypeName() const override { return "{{ class_name }}"; }
+
+    [[nodiscard]] luisa::unique_ptr<luisa::compute::Resource> compile(
+        luisa::compute::Device& device) override;
+
+private:
+    // In runtime mode, these are implemented in the DLL
+    // In static mode, they are implemented in {{ shader_name }}.cpp
+    static {{ shader_name }}Type* create(luisa::compute::Device& device);
+    static void destroy(luisa::compute::Resource* shader);
+};

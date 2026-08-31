@@ -1,0 +1,68 @@
+#pragma once
+
+/**
+ * @brief {{ shader_name }} DLL Export Interface
+ *
+ * This header defines the API for the {{ shader_name }} DLL.
+ * It is shared between the DLL (export) and the application (import).
+ */
+
+#ifdef {{ export_macro }}_EXPORTS
+// When building the DLL, export symbols
+#define {{ export_macro }}_API __declspec(dllexport)
+#elif !defined(RT_RUNTIME)
+// In static mode (not runtime), don't use dll attributes
+#define {{ export_macro }}_API
+#else
+// When using the DLL, import symbols
+#define {{ export_macro }}_API __declspec(dllimport)
+#endif
+
+#include <luisa/luisa-compute.h>
+#include <luisa/dsl/sugar.h>
+
+{% if forward_declarations %}
+// Forward declarations
+{% for decl in forward_declarations %}
+{{ decl }}
+{% endfor %}
+{% endif %}
+
+/**
+ * @brief {{ shader_name }} shader type
+ *
+ * Defines the signature of the {{ shader_name }} kernel.
+ */
+using {{ shader_name }}Type = luisa::compute::Shader2D<
+    {% for param in kernel_params %}
+    {{ param }}{{ "," if not loop.last else "" }}
+    {% endfor %}
+>;
+
+extern "C" {
+/**
+ * @brief Factory function to create the {{ shader_name }} shader
+ *
+ * This function is exported from the DLL and called by the application
+ * to create a new instance of the {{ shader_name }} shader.
+ *
+ * @param device LuisaCompute device for compilation
+ * @return Pointer to the compiled shader as Resource* (Shader2D<...> inherits from Resource)
+ */
+{{ export_macro }}_API luisa::compute::Resource* create{{ function_suffix }}(
+    luisa::compute::Device& device);
+
+/**
+ * @brief Destroy a {{ shader_name }} shader instance
+ *
+ * Deletes the heap-allocated shader object. The virtual ~Resource()
+ * destructor runs ~ShaderBase, which calls device->destroy_shader(handle)
+ * to release the GPU shader handle. Must be called BEFORE FreeLibrary so
+ * the destructor runs in normal app context, not during DLL_PROCESS_DETACH.
+ *
+ * @param shader Pointer to the shader Resource to destroy (may be null)
+ */
+{{ export_macro }}_API void destroy{{ function_suffix }}(
+    luisa::compute::Resource* shader);
+
+} // extern "C"

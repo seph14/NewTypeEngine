@@ -1,0 +1,88 @@
+/**
+ * @brief {{ shader_name }} — Custom Material Callables
+ *
+ * EDIT THIS CODE FOR HOT-RELOAD!
+ *
+ * Each callable receives surface data after standard texture sampling
+ * and can modify it before shading. The callable runs inside device.compile()
+ * and builds DSL AST nodes — it is NOT runtime GPU code.
+ *
+ * Parameters:
+ *   SurfaceData s    — resolved surface (albedo, roughness, metallic, etc.)
+ *                      UV is in s.uv (set by resolve_surface / build_procedural_surface_base).
+ *   Var<MaterialData> mat — raw material data (type, albedo, etc.)
+ *   Float2 screen_uv — pixel position / resolution [0,1]
+ *   Float3 wo        — view direction (outgoing)
+ *   Float time       — frame_count as float
+ *   const BindlessVar& tex — texture bindless array
+ *   UInt w, UInt h   — screen dimensions
+ *
+ * Return: modified SurfaceData
+ *
+ * Available SurfaceData fields (read/write):
+ *   albedo (Float3), emission (Float3), roughness (Float), metallic (Float),
+ *   ior (Float), albedo_alpha (Float), ao (Float), sheen (Float),
+ *   clearcoat (Float), iridescence (Float), ns (Float3) — shading normal,
+ *   tangent (Float3), tangent_w (Float), position (Float3), uv (Float2)
+ */
+
+#include "{{ shader_name }}API.h"
+#include "{{ namespace }}/render/Shading.h"
+#include <luisa/dsl/sugar.h>
+#include <cstdio>
+
+using namespace luisa;
+using namespace luisa::compute;
+using namespace {{ namespace }}::render;
+
+//==============================================================================
+// Callable 1: {{ callables[0].name }} — {{ callables[0].description }}
+//==============================================================================
+static SurfaceResolveFn {{ callables[0].name }}_resolver =
+    [](SurfaceData s, Var<MaterialData> mat,
+       Float2 screen_uv, Float3 wo, Float time,
+       const BindlessVar& tex, UInt w, UInt h) -> SurfaceData {
+
+    // TODO: Implement {{ callables[0].name }} logic here
+    // Example: modify s.albedo, s.roughness, s.emission, etc.
+    // Read UV via s.uv.
+
+    return s;
+};
+
+{% for callable in callables[1:] %}
+//==============================================================================
+// Callable {{ loop.index + 1 }}: {{ callable.name }} — {{ callable.description }}
+//==============================================================================
+static SurfaceResolveFn {{ callable.name }}_resolver =
+    [](SurfaceData s, Var<MaterialData> mat,
+       Float2 screen_uv, Float3 wo, Float time,
+       const BindlessVar& tex, UInt w, UInt h) -> SurfaceData {
+
+    // TODO: Implement {{ callable.name }} logic here
+
+    return s;
+};
+
+{% endfor %}
+//==============================================================================
+// DLL Export Functions
+//==============================================================================
+
+extern "C" {
+
+{{ export_macro }}_API void registerMaterialCallables(
+    {{ export_macro }}_RegisterFn registerFn, {{ export_macro }}_ClearFn clearFn) {
+{% for callable in callables %}
+    registerFn("{{ callable.name }}", {{ callable.name }}_resolver);
+{% endfor %}
+
+    printf("[{{ shader_name }}] Registered {{ callables | length }} custom callables\n");
+}
+
+{{ export_macro }}_API void unregisterMaterialCallables({{ export_macro }}_ClearFn clearFn) {
+    clearFn();
+    printf("[{{ shader_name }}] Unregistered custom callables\n");
+}
+
+} // extern "C"

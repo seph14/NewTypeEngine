@@ -1,0 +1,676 @@
+#pragma once
+
+#include "newtype/core/Config.h"
+#include "newtype/render/Sampling.h"
+#include "newtype/render/Lobe.h"
+#include <luisa/luisa-compute.h>
+#include <luisa/dsl/sugar.h>
+
+namespace newtype::render {
+
+using namespace luisa;
+using namespace luisa::compute;
+
+//==============================================================================
+// Fresnel Terms
+//==============================================================================
+
+/**
+ * @brief Dielectric Fresnel (Schlick approximation)
+ *
+ * Fast approximation for glass/water materials.
+ * R0 = ((eta1 - eta2) / (eta1 + eta2))^2
+ * F = R0 + (1 - R0) * (1 - cos(theta))^5
+ */
+[[nodiscard]] Float fresnel_schlick(
+    Expr<float> R0,
+    Expr<float> cos_theta) noexcept;
+
+/**
+ * @brief Exact dielectric Fresnel
+ *
+ * For accurate glass refraction/reflection.
+ */
+[[nodiscard]] Float fresnel_dielectric(
+    Expr<float> cos_theta_i,
+    Expr<float> eta_i,
+    Expr<float> eta_t) noexcept;
+
+/**
+ * @brief Thin-film interference Fresnel (3-wavelength Airy approximation)
+ *
+ * Computes wavelength-dependent reflectance from a thin dielectric film.
+ * Uses wavelengths R=630nm, G=530nm, B=460nm.
+ */
+[[nodiscard]] Float3 eval_thin_film_iridescence(
+    Expr<float> cos_theta_d,
+    Expr<float> thin_film_ior,
+    Expr<float> thickness) noexcept;
+
+/**
+ * @brief Conductor Fresnel for a complex refractive index eta + i*k (per RGB channel)
+ *
+ * Closed-form Cook-Torrance conductor Fresnel, ported from PBRT v4 FrComplex
+ * (scattering.h:81-92). `eta` and `k` are Float3 — each channel evaluated
+ * independently. Use `MaterialData::attenuation` for eta (overloaded storage)
+ * and `MaterialData::conductor_k` for k.
+ */
+[[nodiscard]] Float3 fresnel_conductor(
+    Expr<float> cos_theta_i,
+    Expr<luisa::float3> eta,
+    Expr<luisa::float3> k) noexcept;
+
+//==============================================================================
+// Microfacet Distribution (GGX/Trowbridge-Reitz)
+//==============================================================================
+
+/**
+ * @brief GGX (Trowbridge-Reitz) microfacet distribution
+ *
+ * D(wh) = alpha^2 / (pi * (cos(theta_h)^4 * (alpha^2 + tan(theta_h)^2)^2))
+ *
+ * Commonly used for PBR roughness modeling.
+ */
+[[nodiscard]] Float ggx_distribution(
+    Expr<luisa::float3> wh,
+    Expr<luisa::float2> alpha) noexcept;
+
+/**
+ * @brief GGX lambda function for shadowing-masking
+ *
+ * Lambda(w) = (-1 + sqrt(1 + 1/(a * tan(theta))^2)) / 2
+ */
+[[nodiscard]] Float ggx_lambda(
+    Expr<luisa::float3> w,
+    Expr<luisa::float2> alpha) noexcept;
+
+/**
+ * @brief GGX geometric term G1
+ *
+ * G1(w) = 1 / (1 + Lambda(w))
+ */
+[[nodiscard]] Float ggx_G1(
+    Expr<luisa::float3> w,
+    Expr<luisa::float2> alpha) noexcept;
+
+/**
+ * @brief GGX geometric term G (Smith correlated)
+ *
+ * G(wo, wi) = 1 / (1 + Lambda(wo) + Lambda(wi))
+ */
+[[nodiscard]] Float ggx_G(
+    Expr<luisa::float3> wo,
+    Expr<luisa::float3> wi,
+    Expr<luisa::float2> alpha) noexcept;
+
+/**
+ * @brief Sample GGX microfacet normal
+ *
+ * Importance sampling of GGX distribution for BSDF sampling.
+ */
+[[nodiscard]] Float3 sample_ggx_wh(
+    Expr<luisa::float3> wo,
+    Expr<luisa::float2> alpha,
+    Expr<luisa::float2> u) noexcept;
+
+/**
+ * @brief PDF of sampled GGX microfacet normal
+ */
+[[nodiscard]] Float ggx_pdf(
+    Expr<luisa::float3> wo,
+    Expr<luisa::float3> wh,
+    Expr<luisa::float2> alpha) noexcept;
+
+/**
+ * @brief Minimum perceptual roughness, matching RTXDI's kMinRoughness.
+ *
+ * RTXDI clamps roughness to this value before squaring into alpha in every
+ * BRDF call (FullSample RAB_Material.hlsli:19, ShadingHelpers.hlsli:33/48,
+ * RAB_Surface.hlsli:235, RAB_LightSampling.hlsli:53, BrdfRayTracing.hlsl:127).
+ * Without this floor, very-low-roughness surfaces collapse the GGX lobe to a
+ * near-delta (alpha^2 ~ 1e-8 vs RTXDI's 8.1e-7), producing fireflies on rare
+ * in-lobe samples and a dim average elsewhere because most light-sampled
+ * candidates miss the lobe.
+ */
+inline constexpr float kMinRoughness = 0.03f;
+
+/**
+ * @brief Convert roughness to GGX alpha
+ *
+ * alpha = max(roughness, kMinRoughness)^2 — clamps at the roughness level
+ * (not the alpha level) to match RTXDI's kMinRoughness convention.
+ */
+[[nodiscard]] inline Float roughness_to_alpha(Float roughness) noexcept {
+    return sqr(max(roughness, kMinRoughness));
+}
+
+[[nodiscard]] inline Float2 roughness_to_alpha(Float2 roughness) noexcept {
+    return sqr(max(roughness, make_float2(kMinRoughness)));
+}
+
+//==============================================================================
+// Kulla-Conty Multiple-Scattering Energy Compensation (gated: NT_ENABLE_MS_GGX)
+//==============================================================================
+
+/**
+ * @brief Single-scattering directional albedo E(mu, alpha) for GGX + Smith, F == 1
+ *
+ * Chebyshev tensor fit (6x6) of G = 1 - E over mu in [0,1], r = sqrt(alpha) in
+ * [0.03, 1]. Fit constants + error table in docs/ms_ggx_compensation.md
+ * (max abs err 0.022, mean 0.004; generated by tools/ms_ggx_fit.py).
+ */
+[[nodiscard]] Float ggx_directional_albedo_fit(
+    Expr<float> mu, Expr<float> alpha) noexcept;
+
+/**
+ * @brief Average albedo E_avg(alpha) = 2*int_0^1 E(mu,alpha) mu dmu
+ *
+ * Deg-5 polynomial in alpha (max abs err 8e-4, tools/ms_ggx_fit.py [3]).
+ */
+[[nodiscard]] Float ggx_avg_albedo_fit(Expr<float> alpha) noexcept;
+
+/**
+ * @brief Cosine-weighted average Fresnel of a Schlick lobe with the given F0
+ *
+ * Closed form: F_avg = F0 + (1 - F0)/21. For complex-IOR conductors pass
+ * F0 = fresnel_conductor(1, eta, k) — verified within 2% of the exact
+ * conductor-Fresnel average for all MetalData presets (docs/ms_ggx_compensation.md).
+ */
+[[nodiscard]] Float3 schlick_f_avg(Expr<float3> F0) noexcept;
+
+//==============================================================================
+// BSDF Evaluations
+//==============================================================================
+
+/**
+ * @brief Lambertian diffuse BRDF
+ *
+ * f(wo, wi) = albedo / pi
+ * PDF(wi) = cos(theta) / pi
+ */
+struct LambertianBSDF {
+    Float3 albedo;
+
+    /** @brief Evaluate BRDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample BRDF (cosine-weighted) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+/**
+ * @brief GGX microfacet reflection (for roughness/metallic)
+ *
+ * Uses Cook-Torrance microfacet model:
+ * f = D * F * G / (4 * cos(wo) * cos(wi))
+ */
+struct MicrofacetBSDF {
+    Float3 albedo;
+    Float2 alpha;         // Roughness^2 (alpha.x for tangent, alpha.y for bitangent)
+    Float metallic;       // 0 = dielectric, 1 = conductor
+    Float ior;            // Index of refraction (for dielectric)
+    Float iridescence           {0.f};
+    Float iridescence_ior       {1.3f};
+    Float iridescence_thickness {0.f};
+    Float3 tangent_dir     {luisa::compute::make_float3(1.f, 0.f, 0.f)};  // world-space tangent
+    Float  bitangent_sign  {1.f};                          // handedness
+    // Complex-IOR conductor Fresnel — active when metallic > 0.5 AND conductor_k != 0.
+    // attenuation slot is overloaded as conductor_eta_re.
+    Float3 conductor_eta        {luisa::compute::make_float3(1.f, 1.f, 1.f)};
+    Float3 conductor_k          {0.f, 0.f, 0.f};
+
+    /** @brief Evaluate BRDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample BRDF (GGX importance sampling) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Microfacet Transmission BSDF (Walter 2007)
+//==============================================================================
+
+/**
+ * @brief GGX microfacet transmission (refraction)
+ *
+ * Walter et al. 2007 microfacet transmission model for dielectric surfaces.
+ * Handles rough refraction through a microfacet surface using the GGX distribution.
+ * For smooth surfaces (roughness=0), collapses to delta (perfect specular refraction).
+ */
+struct MicrofacetTransmissionBSDF {
+    Float3 albedo;       // absorption tint (attenuation color)
+    Float2 alpha;        // roughness^2
+    Float  eta;          // IOR ratio: eta_i / eta_t (e.g., 1.0/ior for entering)
+    Float  ior;          // absolute IOR of dielectric material
+
+    /** @brief Evaluate BTDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample BTDF (Fresnel-weighted reflection or transmission) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf,
+        Bool& out_is_transmission) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Dielectric BSDF (Combined Reflection + Transmission)
+//==============================================================================
+
+/**
+ * @brief Combined dielectric BSDF for glass materials
+ *
+ * Wraps GGX microfacet reflection + microfacet transmission with Fresnel gating.
+ * Fresnel determines the probability of reflection vs transmission.
+ * Supports both smooth (delta) and rough (GGX) dielectrics.
+ */
+struct DielectricBSDF {
+    Float3 albedo;       // absorption tint
+    Float  roughness;
+    Float  ior;
+
+    /** @brief Evaluate dielectric BSDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample dielectric BSDF */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf,
+        Bool& out_is_transmission) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Thin Dielectric BSDF
+//==============================================================================
+
+/**
+ * @brief Thin-walled dielectric BSDF (soap bubble, leaf, paper)
+ *
+ * Models a surface where entry and exit happen at the same point — no spatial
+ * separation. Fresnel determines reflection vs transmission probability.
+ * Transmission is diffuse (cosine-weighted) on the exit side, not refracted.
+ *
+ * For roughness > 0: GGX microfacet reflection instead of delta specular.
+ * Transmission always uses diffuse lobe regardless of roughness.
+ */
+struct ThinDielectricBSDF {
+    Float3 albedo;     // transmission tint (attenuation color)
+    Float  roughness;
+    Float  ior;
+
+    /** @brief Evaluate thin dielectric BSDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample thin dielectric BSDF */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Sheen BSDF (Disney Principled)
+//==============================================================================
+
+/**
+ * @brief Sheen lobe — Charlie microfacet distribution (KHR_materials_sheen)
+ *
+ * Velvet / peach-fuzz rim at grazing angles. Replaces the old overlay
+ * sheen * (1 - cos_theta_d^5), which read ~0.97 already at theta_d = 60 deg
+ * and whitened the entire material (unbounded additive energy on top of the
+ * base).
+ *
+ * f_sheen = strength * D_charlie(theta_h) * G_charlie * sheen_color
+ *           / (4 * NoV * NoL)
+ *   alpha      = max(roughness^2, 1e-3),   inv_alpha = 1 / alpha
+ *   D_charlie  = (2 + inv_alpha) / (2*pi) * sin(theta_h)^inv_alpha
+ *   G_charlie  = 1 / (1 + lambda(NoV) + lambda(NoL))   (Smith, rational fit)
+ *   sheen_color = mix(white, albedo, sheen_tint)
+ * The Disney 0.25 * sheen scale lives in the lobe weight (build_lobe_list /
+ * resolve_surface_layered), matching the clearcoat slot convention; the same
+ * weight is subtracted from the base diffuse-family budget.
+ *
+ * References: Conty Estevez & Kulla, "Production Friendly Microfacet Sheen
+ * BRDF" (SIGGRAPH 2017); KHR_materials_sheen reference implementation.
+ *
+ * Sampling: cosine-weighted hemisphere (the lobe is broad), pdf = cos/pi.
+ * In the BRDF sampling pool under NT_ENABLE_SHEEN_SAMPLING.
+ */
+struct SheenBSDF {
+    Float sheen_strength;
+    Float sheen_tint;    // scalar: 0=white, 1=toward albedo
+    Float3 albedo;       // base color for tinting
+    Float roughness;     // Charlie exponent: inv_alpha = 1 / max(roughness^2, 1e-3)
+
+    /** @brief Evaluate sheen BRDF (additive term) */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample sheen lobe (cosine-weighted hemisphere) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief Sheen sampling pdf (cosine-weighted, cos/pi) */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Clearcoat BSDF (Disney Principled)
+//==============================================================================
+
+/**
+ * @brief Clearcoat additive lobe (Disney Principled BSDF)
+ *
+ * Glossy dielectric coating (varnish, car paint, lacquer).
+ * Uses GGX microfacet with fixed IOR=1.5 (R0=0.04).
+ * Additive in evaluate(); also directly sampleable (NT_ENABLE_COAT_SAMPLING
+ * puts the coat lobe in the composed BRDF sampling pool).
+ *
+ * roughness_cc = mix(0.1, 0.001, clearcoat_gloss)
+ * f_clearcoat = clearcoat * F_schlick * D_ggx * G_ggx / (4 * cos_o * cos_i)
+ */
+struct ClearcoatBSDF {
+    Float clearcoat_strength;
+    Float clearcoat_gloss;   // 0=rough clearcoat, 1=smooth clearcoat
+
+    /** @brief Evaluate clearcoat BRDF (additive term) */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample coat reflection (GGX NDF sampling with alpha_cc) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief Coat reflection pdf (GGX reflection pdf with alpha_cc) */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Subsurface BSDF (Hanrahan-Krueger + Thin Transmission)
+//==============================================================================
+
+/**
+ * @brief Hanrahan-Krueger SSS with diffuse transmission
+ *
+ * Same hemisphere: HK approximation, energy-coupled to the transmission mix
+ *   f = (1 - p_trans) * albedo / (pi * (cos_i + cos_o))
+ *   with p_trans = diffuse_trans * (1 - F(cos_o)) — the same branch
+ *   probability sample()/pdf() use, so reflect + transmit share one budget.
+ * Opposite hemisphere: diffuse transmission tinted by Beer's law absorption
+ *   f_trans = (1-F) * transmission_color * diffuse_trans / (pi * (cos_i + cos_o))
+ *
+ * diffuse_trans controls energy split: 0=pure HK reflection, 1=full transmission.
+ * transmission_color = albedo * exp(-attenuation / attenuation_distance).
+ */
+struct SubsurfaceBSDF {
+    Float3 albedo;
+    Float3 transmission_color;  // precomputed Beer's law tint
+    Float  diffuse_trans;       // 0=HK only, 1=full transmission
+    Float  ior;                 // for Fresnel at surface
+
+    /** @brief Evaluate SSS BRDF (both hemispheres) */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample SSS BRDF (bidirectional) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Fabric Diffuse BSDF (Ashikhmin-Premoze / Disney Fabric)
+//==============================================================================
+
+/**
+ * @brief Fabric diffuse model with grazing-angle enhancement
+ *
+ * f(wo, wi) = (21 / (20*pi)) * albedo * (1 - (1-cos_o)^5) * (1 - (1-cos_i)^5)
+ *
+ * Stronger response at grazing angles compared to Lambertian,
+ * producing a characteristic fabric/cloth appearance.
+ * Uses cosine-weighted hemisphere sampling (same as Lambertian).
+ */
+struct FabricDiffuseBSDF {
+    Float3 albedo;
+
+    /** @brief Evaluate fabric diffuse BRDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Sample fabric diffuse BRDF (cosine-weighted hemisphere) */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Material-Based BSDF Selection
+//==============================================================================
+
+/**
+ * @brief Combined BSDF for MaterialPool integration
+ *
+ * Selects between diffuse and specular based on material properties.
+ * - Low metallic: Lambertian diffuse + GGX specular (layered)
+ * - High metallic: Pure GGX conductor
+ * - Sheen: Additive lobe for fabric-like appearance (sheen > 0)
+ */
+struct MaterialBSDF {
+    Float3 albedo;
+    Float roughness;
+    Float metallic;
+    Float ior;
+    Float sheen_val          {0.f};
+    Float sheen_tint_val     {0.f};
+    Float clearcoat_val      {0.f};
+    Float clearcoat_gloss_val{0.5f};
+    Float iridescence_val          {0.f};
+    Float iridescence_ior_val      {1.3f};
+    Float iridescence_thickness_val{0.f};
+    Float anisotropic_val          {0.f};
+    Float anisotropic_rot_val      {0.f};
+    Float3 tangent_dir       {luisa::compute::make_float3(1.f, 0.f, 0.f)};
+    Float  bitangent_sign    {1.f};
+    UInt   bsdf_type         {0u};    // Material BSDF type tag for dispatch (e.g., 11 = thin dielectric)
+    Float  flatness_val      {0.f};   // Blend: 0=Lambertian, 1=Hanrahan-Krueger SSS
+    Float  fabric_val        {0.f};   // Blend: 0=Lambertian, 1=full Ashikhmin-Premoze fabric diffuse
+    Float  specular_tint_val {0.f};   // 0=white specular, 1=albedo chromaticity tint
+    Float  specular_trans_val{0.f};   // Dielectric transmission energy scale
+    Float3 attenuation_val   {1.f, 1.f, 1.f}; // SSS/glass absorption tint (also: conductor eta_re)
+    Float  diffuse_trans_val {0.f};   // SSS transmission fraction (0=HK only, 1=full transmission)
+    Float  attenuation_distance_val {1.f}; // SSS absorption distance for Beer's law
+    // Complex-IOR conductor Fresnel — set by make_bsdf() from SurfaceData.
+    Float3 conductor_k_val         {0.f, 0.f, 0.f};
+
+    // Anisotropy-rotated tangent (item 10 hoist): the cos/sin/normalize
+    // rotation depends only on the tangent frame + anisotropic_rot + the
+    // surface normal — not on (wo, wi) — so it is computed once per
+    // construction (precompute_tangent_rotation) instead of being rebuilt at
+    // every evaluate/evaluate_split/sample/pdf call site (was 10 mirrored
+    // copies). Kept AFTER the 24 positional fields so existing aggregate
+    // initializations remain valid; default = no rotation.
+    Float3 t_rot_val               {luisa::compute::make_float3(1.f, 0.f, 0.f)};
+
+    /** @brief Populate lobe_list from bsdf_type + Disney params.
+     *  Call after EVERY MaterialBSDF construction,
+     *  including inline constructions that bypass make_bsdf(). */
+    void build_lobe_list() noexcept;
+
+    /** @brief Cache the anisotropy-rotated tangent into t_rot_val.
+     *  Call once after EVERY MaterialBSDF construction — make_bsdf() and the
+     *  scalar-overload sites do — passing the same normal the evaluate /
+     *  evaluate_split / sample / pdf entry points will receive. */
+    void precompute_tangent_rotation(Expr<luisa::float3> normal) noexcept;
+
+    // Lobe-list metadata. Built by build_lobe_list() at construction time.
+    // Consumed by lobe-list dispatch in BSDF.cpp.
+    // Field absent when toggle is off → MaterialBSDF layout unchanged → bit-identical.
+    LobeList lobe_list{};
+
+    // vertical layering — composed-list flag + coat/fuzz layer params.
+    // Active only when has_composed_lobe_list is true. The base layer's params
+    // reuse the existing fields above (albedo, roughness, metallic, etc).
+    // The coat layer (slot 0-1) and fuzz layer (slot 9) read from these
+    // dedicated fields so the type-dispatch path can find them.
+    Bool   has_composed_lobe_list   {false};
+    UInt   coat_bsdf_type           {0u};   // 7=Clearcoat, 3=Dielectric
+    Float  coat_clearcoat_val       {0.f};
+    Float  coat_clearcoat_gloss_val {0.5f};
+    Float  coat_ior                 {1.5f};
+    Float  coat_roughness           {0.f};
+    Float3 coat_attenuation         {1.f, 1.f, 1.f};
+    Float3 fuzz_albedo              {1.f, 1.f, 1.f};
+    Float  fuzz_sheen_val           {0.f};
+    Float  fuzz_sheen_tint_val      {0.f};
+    Float  fuzz_sheen_roughness_val {0.5f};
+    // Forwarded F12 (air→coat) and F23 (coat→base) Fresnel terms, evaluated
+    // once in resolve_surface_layered. Consumed in evaluate/evaluate_split to
+    // skip the per-evaluate fresnel_dielectric recompute.
+    Float  coat_F12                 {0.f};
+    Float  coat_F23                 {0.f};
+
+    // Kulla-Conty MS-GGX invariants, forwarded from SurfaceData::make_bsdf()
+    // (computed once in resolve_surface — material + wo only). Defaults =
+    // no compensation. NT_ENABLE_MS_GGX spec blocks consume these + one E_i
+    // fit per evaluate call. See docs/ms_ggx_compensation.md.
+    Float  ms_e_o                   {1.f};
+    Float  ms_e_avg                 {1.f};
+    Float3 ms_f_avg                 {0.f, 0.f, 0.f};
+
+    /** @brief Evaluate material BSDF */
+    [[nodiscard]] Float3 evaluate(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+
+    /** @brief Evaluate material BSDF with diffuse/specular separated */
+    void evaluate_split(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal,
+        Float3& out_diffuse,
+        Float3& out_specular) const noexcept;
+
+    /** @brief Sample material BSDF */
+    [[nodiscard]] Float3 sample(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> normal,
+        Expr<luisa::float2> u,
+        Float& out_pdf) const noexcept;
+
+    /** @brief PDF of sampling */
+    [[nodiscard]] Float pdf(
+        Expr<luisa::float3> wo,
+        Expr<luisa::float3> wi,
+        Expr<luisa::float3> normal) const noexcept;
+};
+
+//==============================================================================
+// Free function — Phase 2C
+//==============================================================================
+
+/// Populate `lobe_list` from a MaterialBSDF's bsdf_type + Disney params.
+/// Reads the same fields with the same names as MaterialBSDF::build_lobe_list —
+/// zero rename risk. Lifted verbatim from the member function so that
+/// Phase 2D's resolve_surface_layered can build a LobeList for an arbitrary
+/// per-layer MaterialBSDF without going through the wrapper. The member
+/// function becomes a one-line call to this helper.
+///
+void build_lobe_list_for_layer(MaterialBSDF const& bsdf, LobeList& lobe_list) noexcept;
+
+} // namespace newtype::render

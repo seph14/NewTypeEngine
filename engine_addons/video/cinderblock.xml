@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Engine addon: VideoPlayer (MF + D3D11 decode → Luisa image).
+
+  Wires the engine's media pipeline (VideoDecoderD3D11 +
+  VideoTextureBridge + VideoPlayer) into a project. Adds the Windows
+  Media Foundation + D3D11 link inputs required by the decoder, and
+  registers the three sources / four headers under the engine's existing
+  Source Files\newtype\media / Header Files\newtype\media filters.
+
+  Note: the runtime gate `NT_ENABLE_MEDIA_PLAYER` lives in
+  include/newtype/core/Config.h (default 0). The link inputs and source
+  files added here are unconditional; flip the define in Config.h to
+  enable the feature at compile time.
+-->
+<cinderblock>
+  <block id="org.newtype.video"
+         name="VideoPlayer"
+         summary="MF + D3D11 video decode to Luisa image (D3D11 to D3D12 bridge)"
+         author="NewTypeEngine"
+         license="BSD"
+         core="false"
+         url="">
+
+    <source absolute="true">..\src\newtype\media\VideoDecoderD3D11.cpp</source>
+    <source absolute="true">..\src\newtype\media\VideoTextureBridge.cpp</source>
+    <source absolute="true">..\src\newtype\media\VideoPlayer.cpp</source>
+
+    <header absolute="true">..\include\newtype\media\NativeTextureDesc.h</header>
+    <header absolute="true">..\include\newtype\media\VideoDecoderD3D11.h</header>
+    <header absolute="true">..\include\newtype\media\VideoTextureBridge.h</header>
+    <header absolute="true">..\include\newtype\media\VideoPlayer.h</header>
+
+    <platform os="msw">
+      <staticLibrary absolute="true">d3d11.lib</staticLibrary>
+      <staticLibrary absolute="true">dxguid.lib</staticLibrary>
+      <staticLibrary absolute="true">mf.lib</staticLibrary>
+      <staticLibrary absolute="true">mfplat.lib</staticLibrary>
+      <staticLibrary absolute="true">mfreadwrite.lib</staticLibrary>
+      <staticLibrary absolute="true">mfuuid.lib</staticLibrary>
+    </platform>
+  </block>
+</cinderblock>

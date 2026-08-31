@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Engine addon: DirectML / WinML dependency wiring.
+
+  Adds the project settings required to consume Windows ML (WinML) via the
+  CppWinRT language projection. WinML dispatches to DirectML on the GPU
+  under the hood, so this is the dependency set you need for any DirectML
+  inference workload (hand tracking via MediaPipe-trained ONNX models,
+  pose estimation, segmentation, classification, etc.).
+
+  Three pieces of wiring, all project-level (no sources/headers/includes):
+    1. Link runtimeobject.lib — required by the CppWinRT projection.
+    2. Compile with /bigobj — needed by some CppWinRT-heavy TUs that
+       exceed the default COFF section count.
+    3. Set <CppWinRTEnabled>true</CppWinRTEnabled> in Globals — makes
+       MSBuild run cppwinrt.exe and generate projection headers into
+       Generated Files\ at build time.
+
+  This addon does NOT include any hand-tracker / inference classes. Bring
+  your own (e.g. port PalmDetection / HandLandmark / HandClassifier from
+  your own codebase). A typical workflow:
+
+      python tools/cinder_blocks.py add directml (with the project flag)
+
+  Then in code:
+
+      #include <winrt/Windows.Foundation.h>
+      #include <winrt/Windows.AI.MachineLearning.h>
+      // ... use LearningModel, LearningModelSession, etc.
+-->
+<cinderblock>
+  <block id="org.newtype.directml"
+         name="DirectML"
+         summary="WinML / DirectML dependency wiring (CppWinRT + runtimeobject + /bigobj)"
+         author="NewTypeEngine"
+         license="BSD"
+         core="false"
+         url="">
+
+    <!-- runtimeobject.lib: required by the CppWinRT language projection. -->
+    <platform os="msw">
+      <staticLibrary absolute="true">runtimeobject.lib</staticLibrary>
+    </platform>
+
+    <!-- /bigobj: required by some CppWinRT-heavy translation units
+         (large debug-info section count). -->
+    <additionalOption>/bigobj</additionalOption>
+
+    <!-- Trigger MSBuild's CppWinRT projection generator. Generates
+         winrt/*.h into Generated Files\ at build time. Without this,
+         only the pre-built SDK projections are visible. -->
+    <globalsProperty name="CppWinRTEnabled">true</globalsProperty>
+  </block>
+</cinderblock>

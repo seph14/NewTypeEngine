@@ -1,0 +1,107 @@
+/**
+ * @brief {{ shader_name }} Implementation
+ *
+ * When {{ export_macro }}_EXPORTS is defined (building as DLL):
+ * - Exports create{{ function_suffix }}() and destroy{{ function_suffix }}() functions
+ *
+ * When RT_RUNTIME is NOT defined (static linking):
+ * - Provides static compile() function
+ *
+ * EDIT THIS CODE FOR HOT-RELOAD!
+ */
+
+#include "{{ shader_name }}.h"
+#include <luisa/dsl/sugar.h>
+{% if additional_includes %}
+{% for inc in additional_includes %}
+#include {{ inc }}
+{% endfor %}
+{% endif %}
+
+using namespace luisa;
+using namespace luisa::compute;
+{% if using_namespaces %}
+{% for ns in using_namespaces %}
+using namespace {{ ns }};
+{% endfor %}
+{% endif %}
+
+//==============================================================================
+// {{ shader_name }} Kernel Implementation
+//==============================================================================
+
+static luisa::compute::Resource* compile{{ function_suffix }}(luisa::compute::Device& device) {
+    // TODO: Implement your shader kernel here
+    //
+    // Example kernel structure:
+    // Kernel2D {{ shader_name | lower }}_kernel = [&](/* params */) noexcept {
+    //     set_block_size(16u, 16u, 1u);
+    //     UInt2 coord = dispatch_id().xy();
+    //
+    //     // Your shader code here
+    // };
+
+    // Placeholder kernel - replace with your implementation
+    Kernel2D {{ shader_name | lower }}_kernel = [&](
+        {% for param in kernel_params %}
+        {{ param.split("::") | last | replace("Var<", "") | replace(">", "") }} {{ param.split() | last | lower }}{{ "," if not loop.last else "" }}
+        {% endfor %}
+    ) noexcept {
+        set_block_size(16u, 16u, 1u);
+        UInt2 coord = dispatch_id().xy();
+
+        // TODO: Implement your shader logic
+    };
+
+    // Heap-allocate so the shader is destroyed when destroy{{ function_suffix }} calls
+    // delete, BEFORE FreeLibrary. A function-local static would have its
+    // destructor run during DLL_PROCESS_DETACH, where calling
+    // device()->destroy_shader() via the vtable is unsafe.
+    auto compiled = device.compile({{ shader_name | lower }}_kernel);
+    return new decltype(compiled)(std::move(compiled));
+}
+
+//==============================================================================
+// DLL Export Functions
+//==============================================================================
+#ifndef RT_RUNTIME
+extern "C" {
+
+{{ export_macro }}_API luisa::compute::Resource* create{{ function_suffix }}(
+    luisa::compute::Device& device) {
+
+    return compile{{ function_suffix }}(device);
+}
+
+{{ export_macro }}_API void destroy{{ function_suffix }}(
+    luisa::compute::Resource* shader) {
+    // Virtual ~Resource() runs ~ShaderBase → device->destroy_shader(handle),
+    // releasing the GPU shader handle. Must be invoked BEFORE FreeLibrary so
+    // the destructor runs in normal app context, not during DLL_PROCESS_DETACH.
+    delete shader;
+}
+
+} // extern "C"
+#endif
+//==============================================================================
+// Static Mode Implementation
+//==============================================================================
+
+#if defined(RT_RUNTIME) || defined(RT_RUNTIME_DLL)
+
+// Runtime mode: compile() is not used, but we need a stub implementation
+// to allow instantiation of {{ class_name }} for metadata access
+luisa::unique_ptr<luisa::compute::Resource> {{ class_name }}::compile(Device& device) {
+    // In runtime mode, shaders are loaded from DLL, not compiled directly
+    throw std::runtime_error("{{ class_name }}::compile() should not be called in runtime mode. Use loadShader(..., true) instead.");
+}
+
+#else
+
+luisa::unique_ptr<luisa::compute::Resource> {{ class_name }}::compile(Device& device) {
+    // create{{ function_suffix }} now returns Resource*
+    auto* resource = static_cast<luisa::compute::Resource*>(create{{ function_suffix }}(device));
+    return luisa::unique_ptr<luisa::compute::Resource>(resource);
+}
+
+#endif

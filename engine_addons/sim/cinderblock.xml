@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Engine addon: LuisaComputeSimulator (physics).
+
+  Wires the engine's `newtype::physics::Physics` integration with the
+  LuisaComputeSimulator solver library. Adds 8 MSBuild properties to .props
+  (anchored at LCSRoot), an include path set, the
+  LCS_NO_INTERNAL_FIBER_SCHEDULER preprocessor define (supplies the inline
+  SolverInterface ctor), and a config-routed link dependency on
+  luisa-compute-solver-lib.lib.
+
+  Sources/headers/includes use absolute="true" because they reference
+  in-engine paths and engine MSBuild macros, not the block anchor.
+-->
+<cinderblock>
+  <block id="org.newtype.sim"
+         name="LuisaComputeSimulator"
+         summary="Physics solver (LCS) - multi-body LCS integration"
+         author="NewTypeEngine"
+         license="BSD"
+         core="false"
+         url="">
+
+    <includePath absolute="true">$(LCSInclude)</includePath>
+    <includePath absolute="true">$(LCSIncludeLcpp)</includePath>
+    <includePath absolute="true">$(LCSIncludeEigen)</includePath>
+    <includePath absolute="true">$(LCSIncludeYyjson)</includePath>
+
+    <source absolute="true">..\src\newtype\physics\Physics.cpp</source>
+    <header absolute="true">..\include\newtype\physics\Physics.h</header>
+
+    <preprocessorDefine>$(LCSNoInternalFiberScheduler)</preprocessorDefine>
+
+    <platform os="msw" config="debug">
+      <staticLibrary absolute="true">$(LCSLibDebug)\luisa-compute-solver-lib.lib</staticLibrary>
+    </platform>
+    <platform os="msw" config="release">
+      <staticLibrary absolute="true">$(LCSLibRelease)\luisa-compute-solver-lib.lib</staticLibrary>
+    </platform>
+
+    <!--
+      Machine-local root for the LuisaComputeSimulator tree. Mirrors the
+      existing CinderRoot / LuisaComputeRoot pattern in NewTypeEngine.props;
+      override on a per-machine basis by editing this value (or by setting
+      the property from a user .props file imported after this one).
+    -->
+    <property name="LCSRoot">C:\Users\barca\Projects\LuisaComputeSimulator</property>
+    <property name="LCSInclude">$(LCSRoot)\Solver</property>
+    <property name="LCSIncludeLcpp">$(LCSRoot)\ext\lcpp\src</property>
+    <property name="LCSIncludeEigen">$(LCSRoot)\ext\eigen</property>
+    <property name="LCSIncludeYyjson">$(LCSRoot)\ext\embed_yyjson</property>
+    <property name="LCSLibDebug">$(LCSRoot)\build-dx-debug\Debug</property>
+    <property name="LCSLibRelease">$(LCSRoot)\build-dx\Release</property>
+    <property name="LCSNoInternalFiberScheduler">LCS_NO_INTERNAL_FIBER_SCHEDULER</property>
+  </block>
+</cinderblock>
