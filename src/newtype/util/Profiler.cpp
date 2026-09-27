@@ -14,13 +14,13 @@ namespace newtype::util {
 
 	Profiler::Profiler()
 		: _stats(nullptr) {
-#if NT_PROFILING
+#if NT_PROFILING && NT_ENABLE_VALIDATION
 		_stats = Renderer::device().extension<StatsExt>();
 #endif
 	}
 
 	Profiler::~Profiler() {
-#if NT_PROFILING
+#if NT_PROFILING && NT_ENABLE_VALIDATION
 		if (_stats) {
 			//delete _stats;
 		}
@@ -28,21 +28,25 @@ namespace newtype::util {
 	}
 
 	void Profiler::begin_profiling() {
-#if NT_PROFILING
+#if NT_PROFILING 
+#if NT_ENABLE_VALIDATION
 		_stats->begin_stats();
+#endif
 		begin_cpu_frame();
 #endif
 	}
 
 	void Profiler::set_pass(luisa::string_view name) {
-#if NT_PROFILING
+#if NT_PROFILING && NT_ENABLE_VALIDATION
 		_stats->set_next_dispatch_name(luisa::string(name));
 #endif
 	}
 
 	void Profiler::end_profiling() {
-#if NT_PROFILING
+#if NT_PROFILING 
+#if NT_ENABLE_VALIDATION
 		_res = _stats->end_stats();
+#endif
 		end_cpu_frame();
 #endif
 	}
@@ -52,7 +56,7 @@ namespace newtype::util {
 	//==========================================================================
 
 	void Profiler::begin_cpu_frame() {
-#if NT_PROFILING
+#if NT_PROFILING 
 		_cpuTimings.clear();
 #endif
 	}

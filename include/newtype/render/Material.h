@@ -25,8 +25,17 @@ enum class MaterialType : uint {
     Fabric         = 13u,  // fabric diffuse (Ashikhmin-Premoze) + sheen + anisotropy
 };
 
+/// First custom material type id — material callables are assigned sequential
+/// ids starting here. Derived from the last built-in enum value so adding a
+/// built-in type shifts it automatically. Projects and runtime DLLs must
+/// reference this (or render::Material::CustomType) instead of hardcoding
+/// 14u, or materials break when the engine gains a new built-in type
+/// (docs/custom_material_callables.md).
+static constexpr uint kFirstCustomMaterialType =
+    static_cast<uint>(MaterialType::Fabric) + 1u;
+
 //==============================================================================
-// MaterialData — Flat GPU struct (176 bytes, alignas 16)
+// MaterialData — Flat GPU struct (192 bytes, alignas 16; luisa float3 = 16B slot)
 //==============================================================================
 
 /**
@@ -112,7 +121,30 @@ struct alignas(16) MaterialData {
     float iridescence_thickness {0.f};
     float bsdf_type_override    {0.f};  // For custom callables: override BSDF type for G-Buffer PSR. 0 = use material.type
     float fabric                {0.f};  // Blend factor: 0=Lambertian, 1=full Ashikhmin-Premoze fabric diffuse
+
+    // --- Iridescence thickness map (appended; consumes former tail padding) ---
+    // R = factor mask (multiplies `iridescence`), G = thickness mix parameter:
+    //   thickness = mix(iridescence_thickness, iridescence_thickness_max, G)
+    // when a texture is bound AND thickness_max >= 0; otherwise thickness is the
+    // flat `iridescence_thickness` (nm). Sentinel -1 keeps legacy scenes
+    // bit-identical. B/A reserved (e.g. per-pixel film IOR).
+    int   iridescenceTexIdx       {-1};
+    float iridescence_thickness_max {-1.f};
+
+    // --- Dispersion (KHR_materials_dispersion; consumes remaining tail padding) ---
+    // Abbe number V of the dielectric: 0 = off, typical 20-70 (lower = stronger
+    // rainbow spread). Only read for MaterialType::Dielectric refraction paths
+    // (PSR glass chain, rough-glass gather, transmission BSDF sampling) —
+    // ThinDielectric never refracts a direction, so the field is inert there.
+    // `ior` remains the d-line (589nm) index; per-channel indices are derived
+    // on the GPU via dispersed_ior(). Struct stays 192 bytes (8 bytes of tail
+    // padding remained after the iridescence append).
+    float dispersion {0.f};
 };
+
+static_assert(sizeof(MaterialData) == 192u,
+    "dispersion must land in the MaterialData tail padding; growing the struct "
+    "changes every material-buffer stride");
 
 // Field-by-field equality (memcmp is unsafe due to struct padding from alignas(16)
 // + mixed float3/float layout; LuisaCompute Vector<T,N> has no operator==).
@@ -153,7 +185,10 @@ struct alignas(16) MaterialData {
         && a.attenuation_distance == b.attenuation_distance
         && a.iridescence_thickness == b.iridescence_thickness
         && a.bsdf_type_override == b.bsdf_type_override
-        && a.fabric == b.fabric;
+        && a.fabric == b.fabric
+        && a.iridescenceTexIdx == b.iridescenceTexIdx
+        && a.iridescence_thickness_max == b.iridescence_thickness_max
+        && a.dispersion == b.dispersion;
 }
 
 //==============================================================================
@@ -224,6 +259,9 @@ struct DielectricParams {
     // MaterialData.metallic, which is dead for this type). Lower value =
     // higher priority; 0 = default (equal priorities never cut out).
     float interior_priority     {0.f};
+    // Abbe number (0 = off, typical 20-70). Drives per-channel IORs for the
+    // refraction paths; `ior` is the d-line index (see MaterialData.dispersion).
+    float dispersion            {0.f};
     int albedoTexIdx            {-1};
     int normalTexIdx            {-1};
     int rmaTexIdx               {-1};
@@ -238,6 +276,7 @@ struct DielectricParams {
         d.ior               = ior;
         d.specular_trans    = specular_trans;
         d.metallic          = interior_priority;
+        d.dispersion        = dispersion;
         d.albedoTexIdx      = albedoTexIdx;
         d.normalTexIdx      = normalTexIdx;
         d.rmaTexIdx         = rmaTexIdx;
@@ -327,13 +366,18 @@ struct SubsurfaceParams {
 struct ClearcoatParams {
     float clearcoat       {1.f};
     float clearcoat_gloss {0.5f};
-    int normalTexIdx      {-1};
+    // Coat interface IOR (drives the lobe's Schlick R0 AND the layered
+    // F12/F23 base attenuation — resolve_surface_layered reads layer ior).
+    // Disney default 1.5 → R0 0.04 (legacy look).
+    float ior             {1.5f};
+    int normalTexIdx      {-1};   // coat normal map (sampled by resolve_surface_layered)
 
     MaterialData to_data() const {
         MaterialData d{};
         d.type           = static_cast<uint>(MaterialType::Clearcoat);
         d.clearcoat      = clearcoat;
         d.clearcoat_gloss= clearcoat_gloss;
+        d.ior            = ior;
         d.normalTexIdx   = normalTexIdx;
         return d;
     }
@@ -370,7 +414,13 @@ struct AnisotropyParams {
 struct IridescenceParams {
     float iridescence             {1.f};
     float iridescence_ior         {1.3f};
-    float iridescence_thickness   {0.5f};
+    // Film thickness in nm. Without a thickness texture this is the fixed
+    // thickness; with one, it is the range minimum.
+    float iridescence_thickness   {100.f};
+    // Range maximum (nm) for the thickness texture's G channel. Sentinel -1
+    // disables texture mapping (fixed thickness above).
+    float iridescence_thickness_max {-1.f};
+    int   iridescenceTexIdx       {-1};   // R=factor mask, G=thickness mix
 
     MaterialData to_data() const {
         MaterialData d{};
@@ -378,6 +428,8 @@ struct IridescenceParams {
         d.iridescence    =iridescence;
         d.iridescence_ior=iridescence_ior;
         d.iridescence_thickness=iridescence_thickness;
+        d.iridescence_thickness_max=iridescence_thickness_max;
+        d.iridescenceTexIdx=iridescenceTexIdx;
         return d;
     }
 };
@@ -494,7 +546,8 @@ inline MaterialData make_dielectric(
     float roughness  = 0.f,
     int albedoTexIdx = -1,
     int transmissionTexIdx = -1,
-    float interior_priority = 0.f) {
+    float interior_priority = 0.f,
+    float dispersion = 0.f) {
     DielectricParams p;
     p.attenuation   =attenuation;
     p.ior           =ior;
@@ -502,6 +555,7 @@ inline MaterialData make_dielectric(
     p.albedoTexIdx  =albedoTexIdx;
     p.transmissionTexIdx=transmissionTexIdx;
     p.interior_priority = interior_priority;
+    p.dispersion    =dispersion;
     return p.to_data();
 }
 
@@ -597,22 +651,28 @@ inline MaterialData make_sheen(
 inline MaterialData make_clearcoat(
     float clearcoat = 1.f,
     float clearcoat_gloss = 0.5f,
-    int normalTexIdx = -1) {
+    int normalTexIdx = -1,
+    float ior = 1.5f) {
     ClearcoatParams p;
     p.clearcoat      =clearcoat;
     p.clearcoat_gloss=clearcoat_gloss;
     p.normalTexIdx   =normalTexIdx;
+    p.ior            =ior;
     return p.to_data();
 }
 
 inline MaterialData make_iridescence(
     float iridescence = 1.f,
     float iridescence_ior = 1.3f,
-    float iridescence_thickness = 400.f) {
+    float iridescence_thickness = 400.f,
+    float iridescence_thickness_max = -1.f,
+    int iridescenceTexIdx = -1) {
     IridescenceParams p;
     p.iridescence            =iridescence;
     p.iridescence_ior        =iridescence_ior;
     p.iridescence_thickness  =iridescence_thickness;
+    p.iridescence_thickness_max=iridescence_thickness_max;
+    p.iridescenceTexIdx      =iridescenceTexIdx;
     return p.to_data();
 }
 

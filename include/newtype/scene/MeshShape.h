@@ -34,7 +34,12 @@ typedef luisa::unique_ptr<MeshShape> MeshShapePtr;
  */
 class MeshShape : public Shape {
 public:
-    using Vertex = util::Vertex;  // 48 bytes — see util::Vertex static_assert
+    /// CPU authoring type (48 B fp32; see util::Vertex).
+    using Vertex = util::Vertex;
+    /// GPU buffer element type (A2): fp32 by default, packed32/packed40
+    /// when NT_VERTEX_LAYOUT selects them. CPU caches stay `Vertex`; GPU
+    /// uploads stage through util::upload_vertex_buffer.
+    using GpuVertex = util::ActiveVertex;
 
 protected:
     Device &_device;
@@ -44,7 +49,7 @@ protected:
     // Geometry data
     luisa::vector<Vertex>   _vertices;
     luisa::vector<Triangle> _triangles;
-    Buffer<Vertex>          _vertex_buffer;
+    Buffer<GpuVertex>       _vertex_buffer;
     Buffer<Triangle>        _triangle_buffer;
 
     // LuisaCompute resources
@@ -138,6 +143,16 @@ public:
         static_transform->set_matrix(matrix);
     }
 
+    /// Set transform matrix WITHOUT leaving the shape dirty — Geometry
+    /// mirrors already-propagated instance transforms into the shape's
+    /// CPU-side view with this. Use set_transform() for user-facing
+    /// (deferred) updates.
+    void store_transform(const float4x4 &matrix) noexcept {
+        auto static_transform = static_cast<StaticTransform*>(_transform.get());
+        static_transform->set_matrix(matrix);
+        static_transform->clear_dirty();
+    }
+
     /// Check if mesh needs TLAS update
     [[nodiscard]] bool is_dirty() const noexcept { return _transform->is_dirty(); }
 
@@ -155,7 +170,7 @@ public:
     [[nodiscard]] virtual const Mesh* mesh_resource() const noexcept { return _mesh.get(); }
 
     /// Get vertex/triangle buffers
-    [[nodiscard]] virtual const Buffer<Vertex>& vertex_buffer() const noexcept { return _vertex_buffer; }
+    [[nodiscard]] virtual const Buffer<GpuVertex>& vertex_buffer() const noexcept { return _vertex_buffer; }
     [[nodiscard]] const Buffer<Triangle>& triangle_buffer() const noexcept { return _triangle_buffer; }
 
     /// Bindless array slot accessors (set by Geometry during build)

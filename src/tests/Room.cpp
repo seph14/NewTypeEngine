@@ -71,6 +71,11 @@ public:
         auto orangeMatIdx = pipeline.addMaterial("orange",
             render::make_emissive(luisa::make_float3(400.0f, 28.0f, 8.0f)));
 
+        render::MaterialTextures textures;
+        textures.albedo = render::TextureConverter::loadAsset("textures/streetview.png", device, &matPool->stream());// , true, true);
+        render::TextureCompressionSettings compression;
+        compression.enableCompression = true;  // Master toggle
+
         uint whiteMatIdx;
         if (external_albedo_slot() >= 0) {
             // video player / splash sim output as albedo
@@ -78,7 +83,7 @@ public:
             whiteMatIdx = matPool->createMaterial("custom", whitemat);
         }
         else {
-            whiteMatIdx = matPool->createMaterial("custom", whitemat);
+            whiteMatIdx = matPool->createMaterial("custom", whitemat, std::move(textures), compression);
         }
 
         auto layermat = render::make_clearcoat();

@@ -1,10 +1,17 @@
 #pragma once
 
 // Lobe-list BSDF refactor (Disney principled alignment).
-// See plan: C:\Users\barca\.claude\plans\piped-discovering-walrus.md
-// Phase 2 (vertical layering): C:\Users\barca\.claude\plans\eager-orbiting-kitten.md
-// Gated by NT_ENABLE_LOBE_LIST (default 0). When off, MaterialBSDF::lobe_list
-// is not declared and the old dispatch path is bit-identical to pre-refactor.
+//
+// Two representations:
+//  - LobeListData: OWNING parallel arrays (Float/UInt locals). The
+//    materialization point — SurfaceData::composed_lobe_list, written under
+//    $if branches by resolve_surface_layered (assignment-under-branch needs
+//    real locals so DXC can phi them).
+//  - LobeList: NON-OWNING view (Expr arrays). Held by MaterialBSDF; every
+//    element is an expression-DAG reference, so constructing / copying /
+//    passing a LobeList emits ZERO IR statements. Built by
+//    build_standard_lobe_list() (pure DAG from the Disney params) and merged
+//    with the composed list via per-slot ite() in SurfaceData::make_bsdf().
 
 #include <luisa/luisa-compute.h>
 #include <luisa/dsl/sugar.h>
@@ -74,26 +81,15 @@ struct Lobe {
 };
 
 //==============================================================================
-// LobeList — fixed-capacity list built by build_lobe_list() at make_bsdf() time
+// LobeListData — OWNING fixed-capacity list (Float/UInt locals)
 //==============================================================================
 
 // Storage uses parallel arrays of scalar DSL vars rather than Var<Lobe>[N] so
 // that compile-time-unrolled host `for` loops can index them with post-unroll
-// constexpr indices. The iteration pattern in evaluate/sample/pdf:
-//   for (uint i = 0u; i < LobeList::kMaxLobes; ++i) {
-//       $if(i < list.count) {
-//           Float w = list.weights[i];        // i is constexpr post-unroll
-//           UInt  tf = list.type_flags[i];
-//           UInt  t = lobe_type(tf);
-//           UInt  f = lobe_flags(tf);
-//           ...
-//       };
-//   }
-//
-// Phase 2A bit-pack: types[] + flags[] collapsed into a single type_flags[]
-// array. Cap stays at 8 for Phase 2A-2C (single-layer); raised to 10 at start
-// of Phase 2D (profile-gated). DSL-var count: 17 (was 25 in Phase 1).
-struct LobeList {
+// constexpr indices. Written under $if branches (resolve_surface_layered) —
+// assignment-under-branch requires owning locals (phi semantics).
+// Phase 2D: cap 10 (coat slot 0-1 + base slots 2-8 + fuzz slot 9).
+struct LobeListData {
     // Phase 2D: raised from 8 → 10 for vertical layering
     // (coat slot 0-1 + base slots 2-8 + fuzz slot 9).
     // DSL-var count: weights(10) + type_flags(10) + count(1) = 21.
@@ -101,6 +97,23 @@ struct LobeList {
     Float weights[kMaxLobes];        // 10 vars
     UInt  type_flags[kMaxLobes];     // 10 vars — packed (type, flags)
     UInt  count;                     // 1 var = 21 total
+};
+
+//==============================================================================
+// LobeList — NON-OWNING view (Expr arrays), zero IR cost to build/copy
+//==============================================================================
+
+// Same parallel-array layout and constexpr-index iteration pattern as
+// LobeListData, but every element is an Expr reference into an existing
+// expression DAG (computed lobe weights, composed-list locals, or literal
+// constants). Aggregate-initialize with all kMaxLobes elements — Expr has no
+// default constructor and no assignment, which is exactly the view
+// discipline: build once in a factory, never mutate.
+struct LobeList {
+    static constexpr uint kMaxLobes = LobeListData::kMaxLobes;
+    Expr<float> weights[kMaxLobes];
+    Expr<uint>  type_flags[kMaxLobes];
+    Expr<uint>  count;
 };
 
 } // namespace newtype::render

@@ -118,6 +118,7 @@ bool Timeline::drawUi() {
         ImGui::Checkbox("Loop", &_looping);
         ImGui::Checkbox("Update", &_updateEnabled);
         ImGui::Checkbox("Show Timeline", &_showTimeline);
+        ImGui::Checkbox("3D Path Gizmos", &_showGizmos);
         if (ImGui::Button("Require Update")) {
             requestWire = true;
             recalcDuration();
@@ -251,9 +252,13 @@ void Timeline::drawTimeline(float time, float winHeight, float winMaxWidth) {
 
 void Timeline::drawEditor() {
 #if NT_ENABLE_TIMELINE_EDITOR
+    // Playhead ratio so the 3D marker tracks playback (a node must be
+    // selected in the path editor for the marker to show).
+    const float ratio = _duration > 1e-3f
+        ? glm::clamp(_currentTime / _duration, 0.f, 1.f) : 0.f;
     for (auto& evt : _events) {
         if (auto* pathEvt = dynamic_cast<PathTrigger*>(evt.get()))
-            pathEvt->drawEditor();
+            pathEvt->drawDebugPoints(ratio);
     }
 #endif
 }

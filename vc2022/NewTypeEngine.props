@@ -5,10 +5,14 @@
     <CinderRoot>..\..\Cinder</CinderRoot>
     <CinderInclude>$(CinderRoot)\include</CinderInclude>
     <CinderIncludeAngle>$(CinderRoot)\include\ANGLE</CinderIncludeAngle>
-    <CinderLibDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143\cinder.lib</CinderLibDebug>
-    <CinderLibRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143\cinder.lib</CinderLibRelease>
-    <CinderBinDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143</CinderBinDebug>
-    <CinderBinRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143</CinderBinRelease>
+    <!-- Static cinder libs with dynamic CRT (/MDd //MD), matching the engine's
+         CRT. Built from the cinder.vcxproj Debug_MD // Release_MD configs.
+         The original Debug // Release static configs (/MT) are untouched.
+         All engine configs link static cinder (Debug_Runtime included): the
+         runtime shader DLLs reference zero cinder symbols, and shared cinder
+         never exported the D3D12 renderer the app references. -->
+    <CinderLibDebug>$(CinderRoot)\lib\msw\x64\Debug_MD\v143\cinder.lib</CinderLibDebug>
+    <CinderLibRelease>$(CinderRoot)\lib\msw\x64\Release_MD\v143\cinder.lib</CinderLibRelease>
 
     <!-- LuisaCompute Paths -->
     <LuisaComputeRoot>..\..\LuisaCompute</LuisaComputeRoot>
@@ -48,7 +52,60 @@
          inline and gets emitted in every TU that constructs NewtonSolver. -->
     <LCSNoInternalFiberScheduler>LCS_NO_INTERNAL_FIBER_SCHEDULER</LCSNoInternalFiberScheduler>
 
+    <!-- Cling Paths (for runtime shader compilation) -->
+    <!--
+    <ClingRoot>$(ProjectDir)dependencies\Cling</ClingRoot>
+    <ClingInclude>$(ClingRoot)\include</ClingInclude>
+    <ClingLib>$(ClingRoot)\lib</ClingLib>
+    <ClingBin>$(ClingRoot)\bin</ClingBin>
+    -->
+
+    <!-- FidelityFX SDK (vendored subset — see external/FidelityFX/README.md).
+         Header-only at compile time; runtime DLLs are copied next to the exe
+         by a post-build event (loader + upscaler provider must stay colocated).
+         Anchored at this sheet's own directory so every importer (dev exe,
+         NewTypeEngineLib, shader DLLs) resolves the engine checkout's copy. -->
+    <FidelityFXRoot>$(MSBuildThisFileDirectory)..\external\FidelityFX</FidelityFXRoot>
+    <FidelityFXInclude>$(FidelityFXRoot)\include</FidelityFXInclude>
+    <FidelityFXBin>$(FidelityFXRoot)\bin</FidelityFXBin>
+
+    <!-- NVIDIA DLSS SDK — git submodule of the upstream NVIDIA/DLSS repo
+         (pinned to tag v310.9.1). Same stub libs the vendored subset used,
+         at the upstream layout: stub import libs in lib/Windows_x86_64/x64
+         (nvsdk_ngx_d.lib = /MD release, nvsdk_ngx_d_dbg.lib = /MDd debug;
+         the _s static-CRT variants are not used), feature-provider DLLs in
+         lib/Windows_x86_64/dev, copied next to the exe by the post-build
+         event and discovered by the driver-side NGX core.
+         Headers + the nvsdk_ngx_d[_dbg].lib stubs at compile/link time (the _d
+         variants bind the dynamic CRT /MD //MDd; the _s static-CRT lib is not
+         vendored); the feature DLLs (nvngx_dlss.dll / nvngx_dlssd.dll) are
+         copied next to the exe by a post-build event and discovered by the
+         driver-side NGX core. Anchored at this sheet's own directory like
+         FidelityFX above. -->
+    <DlssRoot>$(MSBuildThisFileDirectory)..\external\NVIDIA\DLSS</DlssRoot>
+    <DlssInclude>$(DlssRoot)\include</DlssInclude>
+    <DlssLibDebug>$(DlssRoot)\lib\Windows_x86_64\x64\nvsdk_ngx_d_dbg.lib</DlssLibDebug>
+    <DlssLibRelease>$(DlssRoot)\lib\Windows_x86_64\x64\nvsdk_ngx_d.lib</DlssLibRelease>
+    <DlssBin>$(DlssRoot)\lib\Windows_x86_64\dev</DlssBin>
+
+    <!-- Steam Audio SDK (vendored subset — external/Valve/SteamAudio/README.md).
+         phonon C API: HOA ambisonics encode + HRTF binaural decode for the
+         spatial audio system (newtype/audio). Header + import lib at compile/
+         link time; phonon.dll is copied next to the exe by the post-build
+         step. One CRT-neutral import lib serves both Debug_MD and Release_MD
+         (Steam Audio ships no CRT-bound lib variants). Anchored at this
+         sheet's own directory like FidelityFX/DLSS above. -->
+    <SteamAudioRoot>$(MSBuildThisFileDirectory)..\external\Valve\SteamAudio</SteamAudioRoot>
+    <SteamAudioInclude>$(SteamAudioRoot)\include</SteamAudioInclude>
+    <SteamAudioLib>$(SteamAudioRoot)\lib\x64\phonon.lib</SteamAudioLib>
+    <SteamAudioBin>$(SteamAudioRoot)\bin</SteamAudioBin>
+
     <!-- Platform Toolset -->
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
+  <!--
+  <PropertyGroup Label="UserMacros">
+    <CinderRtInclude>$(ProjectDir)dependencies\Cinder-Runtime\include</CinderRtInclude>
+  </PropertyGroup>
+  -->
 </Project>

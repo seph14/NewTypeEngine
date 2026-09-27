@@ -4,38 +4,209 @@
 
 #include "newtype/scene/Transform.h"
 #include "newtype/util/TypeConv.h"
+#include "cinder/Log.h"
 #include <glm/gtx/matrix_decompose.hpp>
+#include <algorithm>
+#include <cmath>
 
 namespace newtype::scene {
+
+//==============================================================================
+// Transform: hierarchy + dirty propagation
+//==============================================================================
+
+Transform::~Transform() noexcept {
+    // Unlink from parent (parents never own children).
+    if (_parent != nullptr) {
+        auto &siblings = _parent->_children;
+        siblings.erase(std::remove(siblings.begin(), siblings.end(), this),
+                       siblings.end());
+    }
+    // Detach children: they survive as roots. Their world matrices change,
+    // so mark their subtrees dirty to re-flush any registered instances.
+    for (Transform *child : _children) {
+        child->_parent = nullptr;
+        child->_world_stale = true;
+        child->mark_dirty();
+    }
+}
+
+void Transform::set_parent(Transform *parent) noexcept {
+    if (parent == this) {
+        CI_LOG_W("Transform::set_parent: transform cannot be its own parent");
+        return;
+    }
+    if (parent == _parent) return;
+    if (parent != nullptr) {
+        // Reject cycles: walk the prospective ancestor chain.
+        for (auto *ancestor = parent; ancestor != nullptr; ancestor = ancestor->_parent) {
+            if (ancestor == this) {
+                CI_LOG_W("Transform::set_parent: cycle rejected "
+                         "(transform is an ancestor of the new parent)");
+                return;
+            }
+        }
+    }
+    if (_parent != nullptr) {
+        auto &siblings = _parent->_children;
+        siblings.erase(std::remove(siblings.begin(), siblings.end(), this),
+                       siblings.end());
+    }
+    _parent = parent;
+    if (_parent != nullptr) _parent->_children.push_back(this);
+    // The composed world matrix changed: re-mark this subtree so every
+    // registered instance below re-flushes on the next update.
+    mark_dirty();
+}
+
+void Transform::mark_dirty() noexcept {
+    _dirty = true;
+    _world_stale = true;
+    _propagate_dirty(_change);
+}
+
+void Transform::_propagate_dirty(Change c) noexcept {
+    for (Transform *child : _children) {
+        child->_dirty = true;
+        if (c > child->_change) child->_change = c;
+        child->_world_stale = true;
+        child->_propagate_dirty(c);
+    }
+}
+
+namespace {
+
+/// Back-solve a world matrix into parent-local space. Returns the input
+/// unchanged when unparented, or when the parent matrix is singular (e.g.
+/// zero scale) — in that case the caller's intent is unknowable, so the
+/// value is stored as local rather than as NaNs (warns once).
+float4x4 world_to_local(const Transform *self, const float4x4 &world) noexcept {
+    const Transform *parent = self->parent();
+    if (parent == nullptr) return world;
+    float4x4 inv = luisa::inverse(parent->matrix());
+    const bool finite = std::isfinite(inv.cols[0].x) && std::isfinite(inv.cols[1].y) &&
+                        std::isfinite(inv.cols[2].z) && std::isfinite(inv.cols[3].w);
+    if (!finite) {
+        static bool warned = false;
+        if (!warned) {
+            CI_LOG_W("Transform: singular parent matrix cannot back-solve a "
+                     "world-space input - storing it as local instead");
+            warned = true;
+        }
+        return world;
+    }
+    return inv * world;
+}
+
+} // namespace
 
 //==============================================================================
 // StaticTransform
 //==============================================================================
 
-void StaticTransform::set_matrix(const ci::mat4 &ci_mat) noexcept {
-    // Convert ci::mat4 (glm::mat4, column-major) to luisa::float4x4 (row-major)
-    // GLM stores as columns: mat4[col][row]
-    // luisa::float4x4 stores as rows
-    _matrix = make_float4x4(
-        make_float4(ci_mat[0][0], ci_mat[1][0], ci_mat[2][0], ci_mat[3][0]),  // row 0
-        make_float4(ci_mat[0][1], ci_mat[1][1], ci_mat[2][1], ci_mat[3][1]),  // row 1
-        make_float4(ci_mat[0][2], ci_mat[1][2], ci_mat[2][2], ci_mat[3][2]),  // row 2
-        make_float4(ci_mat[0][3], ci_mat[1][3], ci_mat[2][3], ci_mat[3][3])   // row 3
-    );
-    _change = Change::Scale;
+void StaticTransform::_store_local(const float4x4 &m, Change c) noexcept {
+    _matrix = m;
+    _change = c;
     mark_dirty();
 }
+
+void StaticTransform::_store_world(const float4x4 &world, Change c) noexcept {
+    _store_local(world_to_local(this, world), c);
+}
+
+void StaticTransform::set_matrix(const ci::mat4 &world) noexcept {
+    // ci::mat4 (glm, column-access) and float4x4 share the column-major
+    // element convention — a straight copy is exact.
+    _store_world(tolc(world), Change::Scale);
+}
+
+void StaticTransform::set_local_matrix(const ci::mat4 &matrix) noexcept {
+    set_local_matrix(tolc(matrix));
+}
+
+void StaticTransform::set_local_trs(const luisa::float3& t, const luisa::float4& r, const luisa::float3& s) {
+    glm::vec3 scl, pos;
+    glm::quat rot;
+    decompose_local(pos, rot, scl);
+
+    _store_local(luisa::translation(t) *
+              luisa::rotation(normalize(r.xyz()), radians(r.w)) *
+              luisa::scaling(s),
+              glm::length2(scl - toci(s)) > .0001f ? Change::Scale : Change::Affine);
+}
+
+void StaticTransform::set_local_trs(const ci::vec3& t, const ci::quat& r, const ci::vec3& s) {
+    glm::vec3 scl, pos;
+    glm::quat rot;
+    decompose_local(pos, rot, scl);
+
+    _store_local(luisa::translation(tolc(t)) *
+        luisa::rotation (normalize(make_float3(r.x,r.y,r.z)), r.w) *
+        luisa::scaling  (tolc(s)),
+        glm::length2(scl - s) > .0001f ? Change::Scale : Change::Affine);
+}
+
+void StaticTransform::set_local_position(const luisa::float3& p) {
+    set_local_position(toci(p));
+}
+
+void StaticTransform::set_local_rotation(const luisa::float4& r) {
+    set_local_rotation(glm::quat(r.x, r.y, r.z, r.w));
+}
+
+void StaticTransform::set_local_scale(const luisa::float3& s) {
+    set_local_scale(toci(s));
+}
+
+void StaticTransform::decompose_local(ci::vec3& p, ci::quat& r, ci::vec3& s) {
+    auto tmp = toci(_matrix);
+
+    glm::vec3 t, skew;
+    glm::vec4 perspective;
+    glm::decompose(tmp, s, r, p, skew, perspective);
+}
+
+void StaticTransform::set_local_position(const ci::vec3& p) {
+    glm::vec3 s, pos;
+    glm::quat rot;
+    decompose_local(pos, rot, s);
+
+    _store_local(tolc(glm::translate(p)
+            * glm::mat4_cast(rot)
+            * glm::scale(s)), Change::Affine);
+}
+
+void StaticTransform::set_local_rotation(const ci::quat& r) {
+    glm::vec3 s, pos;
+    glm::quat rot;
+    decompose_local(pos, rot, s);
+
+    _store_local(tolc(glm::translate(pos)
+            * glm::mat4_cast(r)
+            * glm::scale(s)), Change::Affine);
+}
+
+void StaticTransform::set_local_scale(const ci::vec3& s) {
+    glm::vec3 scl, pos;
+    glm::quat rot;
+    decompose_local(pos, rot, scl);
+
+    _store_local(tolc  (glm::translate(pos)
+        * glm::mat4_cast(rot)
+        * glm::scale(s)), Change::Scale);
+}
+
+// --- World-space setters (back-solve local through the parent inverse) ---
 
 void StaticTransform::set_trs(const luisa::float3& t, const luisa::float4& r, const luisa::float3& s) {
     glm::vec3 scl, pos;
     glm::quat rot;
     decompose(pos, rot, scl);
 
-    _matrix = luisa::translation(t) *
+    auto world = luisa::translation(t) *
               luisa::rotation(normalize(r.xyz()), radians(r.w)) *
               luisa::scaling(s);
-    _change = glm::length2(scl - toci(s)) > .0001f ? Change::Scale : Change::Affine;
-    mark_dirty();
+    _store_world(world, glm::length2(scl - toci(s)) > .0001f ? Change::Scale : Change::Affine);
 }
 
 void StaticTransform::set_trs(const ci::vec3& t, const ci::quat& r, const ci::vec3& s) {
@@ -43,11 +214,10 @@ void StaticTransform::set_trs(const ci::vec3& t, const ci::quat& r, const ci::ve
     glm::quat rot;
     decompose(pos, rot, scl);
 
-    _matrix = luisa::translation(tolc(t)) *
+    auto world = luisa::translation(tolc(t)) *
         luisa::rotation (normalize(make_float3(r.x,r.y,r.z)), r.w) *
         luisa::scaling  (tolc(s));
-    _change = glm::length2(scl - s) > .0001f ? Change::Scale : Change::Affine;
-    mark_dirty();
+    _store_world(world, glm::length2(scl - s) > .0001f ? Change::Scale : Change::Affine);
 }
 
 void StaticTransform::set_position(const luisa::float3& p) {
@@ -63,7 +233,7 @@ void StaticTransform::set_scale(const luisa::float3& s) {
 }
 
 void StaticTransform::decompose(ci::vec3& p, ci::quat& r, ci::vec3& s) {
-    auto tmp = toci(_matrix);
+    auto tmp = toci(matrix());   // world matrix (parent chain composed)
 
     glm::vec3 t, skew;
     glm::vec4 perspective;
@@ -75,11 +245,9 @@ void StaticTransform::set_position(const ci::vec3& p) {
     glm::quat rot;
     decompose(pos, rot, s);
 
-    _matrix = tolc(glm::translate(p)
+    _store_world(tolc(glm::translate(p)
             * glm::mat4_cast(rot)
-            * glm::scale(s));
-    _change = Change::Affine;
-    mark_dirty();
+            * glm::scale(s)), Change::Affine);
 }
 
 void StaticTransform::set_rotation(const ci::quat& r) {
@@ -87,11 +255,9 @@ void StaticTransform::set_rotation(const ci::quat& r) {
     glm::quat rot;
     decompose(pos, rot, s);
 
-    _matrix = tolc(glm::translate(pos)
+    _store_world(tolc(glm::translate(pos)
             * glm::mat4_cast(r)
-            * glm::scale(s));
-    _change = Change::Affine;
-    mark_dirty();
+            * glm::scale(s)), Change::Affine);
 }
 
 void StaticTransform::set_scale(const ci::vec3& s) {
@@ -99,11 +265,9 @@ void StaticTransform::set_scale(const ci::vec3& s) {
     glm::quat rot;
     decompose(pos, rot, scl);
 
-    _matrix = tolc  (glm::translate(pos)
+    _store_world(tolc  (glm::translate(pos)
         * glm::mat4_cast(rot)
-        * glm::scale(s));
-    _change = Change::Scale;
-    mark_dirty();
+        * glm::scale(s)), Change::Scale);
 }
 
 //==============================================================================
@@ -118,37 +282,103 @@ void AnimatedTransform::_rebuild_matrix() const noexcept {
     _matrixDirty = false;
 }
 
-AnimatedTransform::AnimatedTransform(const float4x4 &m) noexcept
-    : _matrix(m) {
-    ci::vec3 p, scl, skew;
-    ci::vec4 persp;
-    ci::quat rot;
-    glm::decompose(toci(m), scl, rot, p, skew, persp);
+/// Replace the local TRS from a matrix (single decompose, no dirty marking)
+void AnimatedTransform::_assign_local_from_matrix(const float4x4 &m) noexcept {
+    _matrix = m;
+    _matrixDirty = false;
+    ci::vec3 p, s;
+    ci::quat r;
+    glm::vec3 skew;
+    glm::vec4 persp;
+    glm::decompose(toci(m), s, r, p, skew, persp);
     _position = make_float3(p.x, p.y, p.z);
-    _rotation = rot;
-    _scale = make_float3(scl.x, scl.y, scl.z);
+    _rotation = r;
+    _scale = make_float3(s.x, s.y, s.z);
+}
+
+AnimatedTransform::AnimatedTransform(const float4x4 &m) noexcept {
+    _assign_local_from_matrix(m);
 }
 
 AnimatedTransform::AnimatedTransform(const ci::mat4 &m) noexcept
     : AnimatedTransform(tolc(m)) {}
 
-bool AnimatedTransform::is_identity() const noexcept {
+bool AnimatedTransform::_is_self_identity() const noexcept {
     return _position.x == 0.0f && _position.y == 0.0f && _position.z == 0.0f &&
            _rotation.w == 1.0f && _rotation.x == 0.0f && _rotation.y == 0.0f && _rotation.z == 0.0f &&
            _scale.x == 1.0f && _scale.y == 1.0f && _scale.z == 1.0f;
 }
 
-float4x4 AnimatedTransform::matrix() const noexcept {
+float4x4 AnimatedTransform::local_matrix() const noexcept {
     if (_matrixDirty) _rebuild_matrix();
     return _matrix;
 }
 
-void AnimatedTransform::set_position(const luisa::float3& p) noexcept {
-    if (_position.x == p.x && _position.y == p.y && _position.z == p.z) return;
-    _position = p;
+void AnimatedTransform::_decompose_world(ci::vec3& p, ci::quat& r, ci::vec3& s) const noexcept {
+    if (parent() == nullptr) {
+        p = ci::vec3(_position.x, _position.y, _position.z);
+        r = _rotation;
+        s = ci::vec3(_scale.x, _scale.y, _scale.z);
+        return;
+    }
+    glm::vec3 t, scl, skew;
+    glm::vec4 persp;
+    glm::decompose(toci(matrix()), scl, r, p, skew, persp);
+    s = scl;
+}
+
+void AnimatedTransform::_store_world_trs(const ci::vec3& t, const ci::quat& r,
+                                         const ci::vec3& s, Change c) noexcept {
+    if (parent() == nullptr) {
+        _position = make_float3(t.x, t.y, t.z);
+        _rotation = r;
+        _scale = make_float3(s.x, s.y, s.z);
+    } else {
+        auto world = tolc(glm::translate(t) * glm::mat4_cast(r) * glm::scale(s));
+        _assign_local_from_matrix(world_to_local(this, world));
+    }
     _matrixDirty = true;
-    _change = Change::Affine;
+    _change = c;
     mark_dirty();
+}
+
+// --- World TRS accessors (by value; decompose when parented) ---
+
+luisa::float3 AnimatedTransform::position() const noexcept {
+    if (parent() == nullptr) return _position;
+    ci::vec3 p; ci::quat r; ci::vec3 s;
+    _decompose_world(p, r, s);
+    return make_float3(p.x, p.y, p.z);
+}
+
+ci::quat AnimatedTransform::rotation() const noexcept {
+    if (parent() == nullptr) return _rotation;
+    ci::vec3 p; ci::quat r; ci::vec3 s;
+    _decompose_world(p, r, s);
+    return r;
+}
+
+luisa::float3 AnimatedTransform::scale() const noexcept {
+    if (parent() == nullptr) return _scale;
+    ci::vec3 p; ci::quat r; ci::vec3 s;
+    _decompose_world(p, r, s);
+    return make_float3(s.x, s.y, s.z);
+}
+
+// --- World setters (O(1) when root, back-solve when parented) ---
+
+void AnimatedTransform::set_position(const luisa::float3& p) noexcept {
+    if (parent() == nullptr) {
+        if (_position.x == p.x && _position.y == p.y && _position.z == p.z) return;
+        _position = p;
+        _matrixDirty = true;
+        _change = Change::Affine;
+        mark_dirty();
+        return;
+    }
+    ci::vec3 wp; ci::quat wr; ci::vec3 ws;
+    _decompose_world(wp, wr, ws);
+    _store_world_trs(toci(p), wr, ws, Change::Affine);
 }
 
 void AnimatedTransform::set_position(const ci::vec3& p) noexcept {
@@ -156,11 +386,17 @@ void AnimatedTransform::set_position(const ci::vec3& p) noexcept {
 }
 
 void AnimatedTransform::set_rotation(const ci::quat& r) noexcept {
-    if (_rotation.x == r.x && _rotation.y == r.y && _rotation.z == r.z && _rotation.w == r.w) return;
-    _rotation = r;
-    _matrixDirty = true;
-    _change = Change::Affine;
-    mark_dirty();
+    if (parent() == nullptr) {
+        if (_rotation.x == r.x && _rotation.y == r.y && _rotation.z == r.z && _rotation.w == r.w) return;
+        _rotation = r;
+        _matrixDirty = true;
+        _change = Change::Affine;
+        mark_dirty();
+        return;
+    }
+    ci::vec3 wp; ci::quat wr; ci::vec3 ws;
+    _decompose_world(wp, wr, ws);
+    _store_world_trs(wp, r, ws, Change::Affine);
 }
 
 void AnimatedTransform::set_rotation(const luisa::float4& r) noexcept {
@@ -168,11 +404,17 @@ void AnimatedTransform::set_rotation(const luisa::float4& r) noexcept {
 }
 
 void AnimatedTransform::set_scale(const luisa::float3& s) noexcept {
-    if (_scale.x == s.x && _scale.y == s.y && _scale.z == s.z) return;
-    _change = Change::Scale;
-    _scale = s;
-    _matrixDirty = true;
-    mark_dirty();
+    if (parent() == nullptr) {
+        if (_scale.x == s.x && _scale.y == s.y && _scale.z == s.z) return;
+        _change = Change::Scale;
+        _scale = s;
+        _matrixDirty = true;
+        mark_dirty();
+        return;
+    }
+    ci::vec3 wp; ci::quat wr; ci::vec3 ws;
+    _decompose_world(wp, wr, ws);
+    _store_world_trs(wp, wr, toci(s), Change::Scale);
 }
 
 void AnimatedTransform::set_scale(const ci::vec3& s) noexcept {
@@ -180,16 +422,68 @@ void AnimatedTransform::set_scale(const ci::vec3& s) noexcept {
 }
 
 void AnimatedTransform::set_trs(const luisa::float3& t, const luisa::float4& r, const luisa::float3& s) noexcept {
-    bool scaleChanged = _scale.x != s.x || _scale.y != s.y || _scale.z != s.z;
-    _position = t;
-    _rotation = ci::quat(r.x, r.y, r.z, r.w);
-    _scale = s;
-    _matrixDirty = true;
-    _change = scaleChanged ? Change::Scale : Change::Affine;
-    mark_dirty();
+    set_trs(toci(t), ci::quat(r.x, r.y, r.z, r.w), toci(s));
 }
 
 void AnimatedTransform::set_trs(const ci::vec3& t, const ci::quat& r, const ci::vec3& s) noexcept {
+    if (parent() == nullptr) {
+        bool scaleChanged = _scale.x != s.x || _scale.y != s.y || _scale.z != s.z;
+        _position = make_float3(t.x, t.y, t.z);
+        _rotation = r;
+        _scale = make_float3(s.x, s.y, s.z);
+        _matrixDirty = true;
+        _change = scaleChanged ? Change::Scale : Change::Affine;
+        mark_dirty();
+        return;
+    }
+    ci::vec3 wp; ci::quat wr; ci::vec3 ws;
+    _decompose_world(wp, wr, ws);
+    _store_world_trs(t, r, s, glm::length2(ws - s) > .0001f ? Change::Scale : Change::Affine);
+}
+
+// --- Local setters (O(1) compare-and-set on the cached TRS) ---
+
+void AnimatedTransform::set_local_position(const luisa::float3& p) noexcept {
+    if (_position.x == p.x && _position.y == p.y && _position.z == p.z) return;
+    _position = p;
+    _matrixDirty = true;
+    _change = Change::Affine;
+    mark_dirty();
+}
+
+void AnimatedTransform::set_local_position(const ci::vec3& p) noexcept {
+    set_local_position(make_float3(p.x, p.y, p.z));
+}
+
+void AnimatedTransform::set_local_rotation(const ci::quat& r) noexcept {
+    if (_rotation.x == r.x && _rotation.y == r.y && _rotation.z == r.z && _rotation.w == r.w) return;
+    _rotation = r;
+    _matrixDirty = true;
+    _change = Change::Affine;
+    mark_dirty();
+}
+
+void AnimatedTransform::set_local_rotation(const luisa::float4& r) noexcept {
+    set_local_rotation(ci::quat(r.x, r.y, r.z, r.w));
+}
+
+void AnimatedTransform::set_local_scale(const luisa::float3& s) noexcept {
+    if (_scale.x == s.x && _scale.y == s.y && _scale.z == s.z) return;
+    _change = Change::Scale;
+    _scale = s;
+    _matrixDirty = true;
+    mark_dirty();
+}
+
+void AnimatedTransform::set_local_scale(const ci::vec3& s) noexcept {
+    set_local_scale(make_float3(s.x, s.y, s.z));
+}
+
+void AnimatedTransform::set_local_trs(const luisa::float3& t, const luisa::float4& r, const luisa::float3& s) noexcept {
+    set_local_trs(toci(t), ci::quat(r.x, r.y, r.z, r.w), toci(s));
+}
+
+void AnimatedTransform::set_local_trs(const ci::vec3& t, const ci::quat& r, const ci::vec3& s) noexcept {
     bool scaleChanged = _scale.x != s.x || _scale.y != s.y || _scale.z != s.z;
     _position = make_float3(t.x, t.y, t.z);
     _rotation = r;
@@ -199,60 +493,10 @@ void AnimatedTransform::set_trs(const ci::vec3& t, const ci::quat& r, const ci::
     mark_dirty();
 }
 
-//==============================================================================
-// TransformTree::Node
-//==============================================================================
-
-float4x4 TransformTree::Node::matrix() const noexcept {
-    if (_transform == nullptr) return make_float4x4(1.0f);
-    auto local = _transform->matrix();
-    if (_parent == nullptr) return local;
-    auto parent_matrix = _parent->matrix();
-    return parent_matrix * local;
-}
-
-//==============================================================================
-// TransformTree
-//==============================================================================
-
-void TransformTree::push(const Transform *t) noexcept {
-    auto parent = _node_stack.empty() ? nullptr : _node_stack.back();
-    auto is_static = _static_stack.empty() ? true :
-                    (_static_stack.back() && t->is_static());
-    _nodes.emplace_back    (luisa::make_unique<Node>(parent, t));
-    _node_stack.push_back  (_nodes.back().get());
-    _static_stack.push_back(is_static);
-}
-
-void TransformTree::pop(const Transform *t) noexcept {
-    _node_stack.pop_back  ();
-    _static_stack.pop_back();
-}
-
-std::pair<const TransformTree::Node *, bool>
-TransformTree::leaf(const Transform *t) noexcept {
-    auto node = _node_stack.empty() ? nullptr : _node_stack.back();
-    auto is_static = _static_stack.empty() ? true : _static_stack.back();
-    return {node, is_static};
-}
-
-bool TransformTree::is_dirty() const noexcept {
-    // Check if any transform in current chain is dirty
-    for (auto *node : _node_stack) {
-        if (node->transform() && node->transform()->is_dirty()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-//==============================================================================
-// InstancedTransform
-//==============================================================================
-
-bool InstancedTransform::is_dirty() const noexcept {
-    if (node == nullptr || node->transform() == nullptr) return false;
-    return node->transform()->is_dirty();
+void AnimatedTransform::set_local_matrix(const float4x4 &m) noexcept {
+    _assign_local_from_matrix(m);
+    _change = Change::Scale;
+    mark_dirty();
 }
 
 } // namespace newtype::scene

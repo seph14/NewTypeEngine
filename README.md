@@ -1,27 +1,30 @@
 # NewTypeEngine
 
-Real-time path tracing engine for Windows, built on [Cinder](https://github.com/cinder/Cinder) (windowing / OpenGL display) and [LuisaCompute](https://github.com/LuisaGroup/LuisaCompute) (GPU compute + DSL). It renders production-quality global illumination at interactive rates using **ReSTIR DI / ReSTIR GI** on a **two-pass deferred visibility-buffer pipeline**, with a **ReLAX-style denoiser** on top.
+Real-time path tracing engine for Windows, built on [Cinder](https://github.com/cinder/Cinder) (windowing / display) and [LuisaCompute](https://github.com/LuisaGroup/LuisaCompute) (GPU compute + DSL). It renders production-quality global illumination at interactive rates using **ReSTIR DI / ReSTIR GI** on a **two-pass deferred visibility-buffer pipeline**, with a **ReLAX-style denoiser** on top.
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  LuisaCompute   │────▶│ DX-OpenGL        │────▶│ Cinder (OpenGL) │
-│  (DX kernels)   │     │ Interop          │     │   Display       │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
+│  LuisaCompute   │────▶│ DxPresent (on-device     │────▶│ Cinder D3D12    │
+│  (DX kernels)   │     │ copy into back buffer)   │     │ swap chain      │
+└─────────────────┘     └──────────────────────────┘     └─────────────────┘
 ```
 
-LuisaCompute kernels write into an `Image<float>`, the result is shared zero-copy to an OpenGL texture via DX-GL interop, and Cinder displays it. The app window is a thin shell — all rendering logic lives in the `Pipeline`.
+LuisaCompute kernels write into an `Image<float>`; the Luisa device adopts Cinder `RendererD3d12`'s `ID3D12Device` and `DxPresent` copies the tone-mapped frame into the swap-chain back buffer (`src/newtype/core/DxPresent.cpp`). Launch with `--gl` to fall back to the classic DX-GL interop + OpenGL present path — handy for fast GL prototypes, and the way to stay compatible with Cinder blocks that hook the GL renderer (e.g. the Warp block for projection mapping). The app window is a thin shell — all rendering logic lives in the `Pipeline`.
 
 ## Gallery
-![logo](./gallery/logo.jpg)
-![material](./gallery/material.jpg)
+
+![render_feature](./gallery/render_features.jpg)
 ![cornell](./gallery/cornell_conductor.jpg)
-![room](./gallery/room.jpg)
+![equirectangular](./gallery/equi_camera.jpg)
+![fisheye](./gallery/fisheye_camera.jpg)
+
 
 ## Features
 
 **Rendering**
 - **ReSTIR DI** — reservoir-based direct lighting with light presampling, temporal/spatial reuse and visibility reuse for thousands of emissive triangles.
 - **ReSTIR GI** — spatiotemporal reservoir reuse for indirect light, incl. delta-branch handling for metals/glass.
+- **SHARC radiance cache** — port of NVIDIA SHARC v1.8.3 (logarithmic voxel hash grid): sparse path-traced update + temporal resolve maintains a world-space surface-incident radiance cache; GI terminates secondary hits on it for converged multi-bounce indirect (incl. behind glass), and the post-denoise glass pass evaluates rough/frosted glass (GGX transmission + reflection taps) and smooth dispersive glass (per-channel replay) against it. See `docs/sharc_rough_glass_plan.md`.
 - **ReLAX denoiser** — port of NRD v4.17 ReLAX (prefilter → hit & temporal → atrous → history), with separate specular denoising and disocclusion handling.
 - **Two-pass deferred pipeline** — pass 1 traces primary rays into a 20 B/pixel visibility-buffer G-buffer (depth R32F, vis RG32U, barycentrics RG16F, motion RG16F); pass 2 reconstructs positions, interpolates normals/UVs via bindless vertex reads, shades with materials + light sampler, and fires shadow rays. TAA-style Halton jitter is compensated by motion vectors for clean temporal reprojection.
 - **Environment maps** — HDR env lighting with importance sampling, mixed with emissive mesh lights.
@@ -44,16 +47,34 @@ LuisaCompute kernels write into an `Image<float>`, the result is shared zero-cop
 
 - Windows 10/11, Visual Studio 2022 (Platform Toolset v143, C++20)
 - NVIDIA RTX GPU (the pipeline is built on DX12 ray tracing)
-- [Cinder](https://github.com/cinder/Cinder) (master, built for v143)
-- [LuisaCompute](https://github.com/seph14/LuisaCompute) — pre-built with CMake/MSVC; the project links the **DirectX** backend (raster interop requires it), CUDA toolkit 12.1 is only needed if you also build LuisaCompute's CUDA path. 
-- [LuisaComputeSimulator](https://github.com/LuisaGroup/LuisaComputeSimulator) — cloth physics solver (optional, linked by all configurations)
+- [Cinder](https://github.com/seph14/Cinder) — please use this fork: it adds the `Debug_MD`/`Release_MD` static-lib configs (dynamic CRT) the engine links, which upstream cinder does not ship
+- [LuisaCompute](https://github.com/seph14/LuisaCompute) — please use this fork: it adds the GPU-side BLAS transform-buffer upload (`Accel::set_transform_buffer_on_update`) that the dynamic-geometry / TetCage pipelines rely on. Pre-build it with CMake/MSVC; the project links the **DirectX** backend (raster interop requires it), CUDA toolkit 12.1 is only needed if you also build LuisaCompute's CUDA path
+- [LuisaComputeSimulator](https://github.com/LuisaGroup/LuisaComputeSimulator) — cloth physics solver (linked by all configurations)
+
+### External SDKs (git submodules)
+
+The upscaler and spatial-audio backends consume three SDKs under `external/`,
+wired as git submodules — after cloning, run:
+
+```bash
+git submodule update --init
+```
+
+| Path | What it provides | Source |
+|------|------------------|--------|
+| `external/FidelityFX` | FidelityFX SDK v2.3.0 headers + runtime DLLs — FSR 3.1 upscaler backend (MIT) | [seph14/FidelityFX-dist](https://github.com/seph14/FidelityFX-dist), a vendored dist of [GPUOpen-LibrariesAndSDKs/FidelityFX-SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) tag `v2.3.0` |
+| `external/NVIDIA/DLSS` | NGX headers, stub libs, feature DLLs — DLSS-SR + Ray Reconstruction backends | [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) tag `v310.9.1` (cloning it means you accept NVIDIA's RTX SDK license) |
+| `external/Valve/SteamAudio` | Steam Audio v4.8.1 phonon C API — HOA ambisonics + HRTF binaural spatial audio (Apache-2.0) | [seph14/SteamAudio-dist](https://github.com/seph14/SteamAudio-dist), a vendored dist of the [ValveSoftware/steam-audio](https://github.com/ValveSoftware/steam-audio) `v4.8.1` release asset |
+
+Post-build events copy the FidelityFX / NGX / phonon runtime DLLs next to the
+engine exe; the paths are wired in `vc2022/NewTypeEngine.props`.
 
 ## Building
 
 1. **Clone the dependencies** and note their locations:
 
    ```bash
-   git clone https://github.com/cinder/Cinder
+   git clone https://github.com/seph14/Cinder
    git clone https://github.com/seph14/LuisaCompute
    git clone <this repo>
    ```
@@ -78,11 +99,31 @@ LuisaCompute kernels write into an `Image<float>`, the result is shared zero-cop
 
    or open `vc2022/NewTypeEngine.sln` in Visual Studio and build `Release | x64`. The post-build step copies the Cinder/LuisaCompute DLLs next to the exe. The exe must be able to find the `assets/` folder (models, textures, HDR envmaps, configs) — run it from the repository root or set the debugger working directory accordingly.
 
-Feature toggles live in [`include/newtype/core/Config.h`](include/newtype/core/Config.h) (`NT_ENABLE_GI`, `NT_ENABLE_DENOISER`, `NT_ENABLE_BSSRDF`, …) — use `#if`, never `#ifdef`.
+Feature toggles live in [`include/newtype/core/Config.h`](include/newtype/core/Config.h) (`NT_ENABLE_GI`, `NT_ENABLE_DENOISER`, `NT_ENABLE_SHARC`, `NT_ENABLE_DISPERSION`, …) — use `#if`, never `#ifdef`.
 
-5. **LuisaCompute dependency**:
+### Configurations
 
-Current LuisaCompute stable branch has a bug where DirectX BC6H/BC7 would crash on execution. Please use my [fork](https://github.com/seph14/LuisaCompute), or use the [next](https://github.com/LuisaGroup/LuisaCompute) branch. 
+| Config | What it is |
+|--------|------------|
+| `Debug` / `Release` | The dev app, engine sources compiled into the exe (static /MD(d) cinder). |
+| `Debug_Runtime` | Debug + shader-DLL hot reload (`RT_RUNTIME`): runtime shader DLLs and the custom-material callable DLL are loaded and rebuilt on source change. Links exactly like Debug (all configs use static cinder — shared cinder never exported the D3D12 renderer). |
+| `NewTypeEngineLib` | The prebuilt static library project (ActiveCfg-only in the solution; built by `tools/package_dist.py`). |
+
+## Using the engine in your own project
+
+The fastest route is the prebuilt library: package a self-contained distro
+(static engine lib + headers + cinder + LuisaCompute DLLs + FidelityFX), then
+scaffold a project that compiles only its own `App.cpp`:
+
+```bash
+python tools/package_dist.py --verify                # builds lib + assembles dist/ + smoke test
+python tools/generate_project.py --path D:/Projects --name MyDemo   # links the prebuilt lib (default)
+```
+
+`--engine source` instead copies the whole engine tree into the project for
+free modification (the previous behaviour). See
+[`docs/prebuilt_dist.md`](docs/prebuilt_dist.md) for the distro layout, the
+frozen-macro/ABI-fingerprint policy, and the packaging how-to.
 
 ## Sample scenes
 
@@ -92,7 +133,6 @@ The app ships with three self-contained scenes in [`src/tests/`](src/tests). Pic
 NewTypeEngine.exe --scene cornell    # Cornell box, animated glass + occluder
 NewTypeEngine.exe --scene material   # material sphere grid (default)
 NewTypeEngine.exe --scene room       # furnished interior, glass/metal/fabric
-NewTypeEngine.exe --scene logo       # simple setup with logo mesh
 ```
 
 | Scene | File | What it exercises |
@@ -192,19 +232,25 @@ src/newtype/        engine implementation (mirrors include/)
 runtime_shaders/    standalone shader projects (hot-reloadable in Debug_Runtime)
 assets/             models (OBJ/VAT), textures, HDR envmaps, configs, audio
 docs/               design notes: pipeline, ReSTIR/denoiser analyses, material layers, …
-vc2022/             Visual Studio solution + property sheets
+vc2022/             Visual Studio solution + property sheets (EngineCommon.props = central compile blob)
+vc2022/NewTypeEngineLib/  prebuilt static-library project (packaged by tools/package_dist.py)
 ```
 
 ## Documentation
 
-Design notes and post-mortems live in [`docs/`](docs) — good starting points:
+Feature guides and examples live in [`docs/`](docs):
 
-- [`docs/realtime_path_tracing_pipeline.md`](docs/realtime_path_tracing_pipeline.md) — pipeline overview
-- [`docs/relax-denoiser-plan.md`](docs/relax-denoiser-plan.md) — denoiser port notes
-- [`docs/material_layer.md`](docs/material_layer.md) / [`docs/material_improvements.md`](docs/material_improvements.md) — material system
-- [`docs/dsl-optimization-guide.md`](docs/dsl-optimization-guide.md) — writing fast LuisaCompute kernels
-
-[`CLAUDE.md`](CLAUDE.md) documents coding conventions and implementation invariants for AI agents (also used by the skill files in `.agents/skills/`).
+- [`docs/tetcage.md`](docs/tetcage.md) — TetCageGeometry: animated tetrahedral-cage deformation (`.tetcage` files built with the [TetCage tool](https://github.com/seph14/NewTypeEngine_Toolings))
+- [`docs/instancedmesh.md`](docs/instancedmesh.md) — InstancedMesh shared-BLAS instancing, incl. GPU-owned instance transforms
+- [`docs/procedural_mesh.md`](docs/procedural_mesh.md) — ProceduralGeometry deformable mode
+- [`docs/pointcloud.md`](docs/pointcloud.md) — point-cloud plugin
+- [`docs/trail.md`](docs/trail.md) — trail feature
+- [`docs/physics.md`](docs/physics.md) — cloth / soft body / rigid body via LuisaComputeSimulator
+- [`docs/Timeline.md`](docs/Timeline.md) — timeline editor examples
+- [`docs/MaterialExample.md`](docs/MaterialExample.md) — material & texture examples
+- [`docs/custom_material_callables.md`](docs/custom_material_callables.md) — custom material GPU callables
+- [`docs/HotReloadShader.md`](docs/HotReloadShader.md) — hot-reload shader workflow
+- [`docs/prebuilt_dist.md`](docs/prebuilt_dist.md) — prebuilt engine library: distro layout, frozen-macro/ABI policy, packaging
 
 ## License
 

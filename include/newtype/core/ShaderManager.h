@@ -6,9 +6,12 @@
 #include <cinder/app/App.h>
 #include "../util/MoveOnlyAny.h"
 #include "newtype/core/IShaderGenerator.h"
+#include "newtype/core/EngineVersion.h"
 
-// Include DLLHotReload header for runtime mode (needed for getShader template)
-#ifdef RT_RUNTIME
+// Include DLLHotReload header for the DLL shader machinery (compiled into
+// every _DEBUG binary — the prebuilt Debug lib serves both plain-Debug and
+// Debug_Runtime (RT_RUNTIME) consumers; see docs/Prebuilt Engine Library.md).
+#ifdef _DEBUG
 #include "newtype/runtime/DLLHotReload.h"
 #endif
 
@@ -24,7 +27,7 @@
 #include <memory>
 
 // Type alias for DLL loader pointer
-#ifdef RT_RUNTIME
+#ifdef _DEBUG
 namespace newtype::runtime {
     using DllRef = std::unique_ptr<DLLHotReload>;
 }
@@ -35,6 +38,44 @@ namespace newtype::core {
 // Forward declarations
 template<uint dim>
 class IShaderGenerator;
+class ShaderManager;
+
+/**
+ * @brief Typed handle to a ShaderManager-registered shader.
+ *
+ * Replaces per-dispatch string lookups: resolution (name lookup +
+ * dynamic_cast) happens once on the first dispatch, and again only after a
+ * registry mutation (registration, clear, DLL hot-reload) invalidates the
+ * cached pointer — detected via a generation compare. Steady-state dispatch
+ * cost is one integer compare plus the shader invocation itself.
+ *
+ * assign() only records the name; resolution is deferred to the first
+ * dispatch, so the shader may be registered before or after assign().
+ *
+ * All handle use must happen on the main thread (the same thread as every
+ * registry mutation; the RT_RUNTIME watch thread never touches the registry).
+ */
+template<uint dim, typename... Args>
+class ShaderHandle {
+public:
+    ShaderHandle() = default;
+
+    /// Configure the shader name; drops any cached resolution.
+    void assign(std::string_view name) { _name = name; _shader = nullptr; }
+
+    /// A name is configured (not necessarily resolvable yet).
+    [[nodiscard]] bool is_set() const noexcept { return !_name.empty(); }
+    /// Resolved and current (false until the first successful dispatch).
+    [[nodiscard]] bool valid() const noexcept { return _shader != nullptr; }
+    [[nodiscard]] const std::string &name() const noexcept { return _name; }
+
+private:
+    friend class ShaderManager;
+
+    std::string _name;
+    const luisa::compute::Shader<dim, Args...> *_shader = nullptr;
+    uint32_t _generation = 0u;  // registry epoch _shader was resolved in
+};
 
 /**
  * @brief Callback type for shader reload events
@@ -48,12 +89,19 @@ using ReloadCallback = std::function<void(std::string_view)>;
  * @brief Hot-reloadable DSL shader manager
  *
  * Supports dual-mode operation:
- * - **Debug_Runtime**: File watching enabled, detects shader changes
- * - **Debug/Release**: Static linking with zero overhead
+ * - **Debug/Debug_Runtime**: DLL shader machinery compiled in; loading a
+ *   shader as a DLL (hotReload=true) enables file watching + hot reload
+ * - **Release**: Static linking with zero overhead
+ *
+ * The machinery is keyed on _DEBUG (not RT_RUNTIME) so the prebuilt Debug
+ * library serves both plain-Debug and Debug_Runtime (RT_RUNTIME) consumers
+ * with an identical class layout. RT_RUNTIME only flips the loadShader()
+ * hot-reload default and isRuntimeMode() at the consumer's side.
  *
  * Features:
  * - Load shaders from IShaderGenerator instances
- * - File watching for shader source changes (Debug_Runtime only)
+ * - File watching for shader source changes (starts with the first DLL
+ *   shader load; plain Debug apps without shader DLLs pay nothing)
  * - Callable registry for helper functions
  * - Singleton pattern for app-wide access
  *
@@ -65,12 +113,13 @@ using ReloadCallback = std::function<void(std::string_view)>;
  *   PathTracerShader generator;  // Implements IShaderGenerator
  *   sm.loadShader(generator, true);  // Enable hot-reload (Debug_Runtime only)
  *
- *   // In update() - enables hot reload detection in Debug_Runtime
- *   ShaderManager::instance().update();
+ *   // Member: resolved once, re-resolved automatically after registry
+ *   // mutations (registration, clear, DLL hot-reload).
+ *   ShaderHandle<2, Buffer<float4>, uint> _pathTracer;
+ *   _pathTracer.assign("path_tracer");
  *
- *   // In draw()
- *   auto& shader = sm.getShader<PathTracerShader::ShaderType>("path_tracer");
- *   stream << shader(args...).dispatch(w, h);
+ *   // In draw() - no string lookup on the hot path
+ *   stream << sm.shader(_pathTracer, args...).dispatch(w, h);
  * @endcode
  */
 class ShaderManager {
@@ -91,16 +140,18 @@ public:
     /**
      * @brief Load a shader from an IShaderGenerator
      *
-     * In Debug_Runtime mode with hotReload=true:
+     * With hotReload=true (the default when the consumer defines RT_RUNTIME,
+     * i.e. the Debug_Runtime config):
      *   - Loads the shader as a DLL for hot-reloading
-     *   - File watching enabled for source changes
+     *   - Starts the file-watch thread with the first DLL shader load
      *
-     * In Debug/Release mode OR with hotReload=false:
+     * With hotReload=false (the default in plain Debug and Release):
      *   - Compiles the shader directly from the generator
      *   - No hot-reload capability (zero overhead)
      *
      * @param generator Shader generator instance
-     * @param hotReload Enable DLL hot-reload (ignored in Debug/Release, only applies to Debug_Runtime)
+     * @param hotReload Enable DLL hot-reload (mechanism exists in all _DEBUG
+     *        builds; ignored in Release)
      * @return true if loaded successfully
      */
 
@@ -127,7 +178,7 @@ public:
      */
     //bool loadShader(std::string_view name, std::string_view sourcePath);
 
-#ifdef RT_RUNTIME
+#ifdef _DEBUG
     /**
      * @brief Set the reload callback for the DLL hot-reload manager
      *
@@ -138,7 +189,7 @@ public:
 
     void launch();
 
-#ifdef RT_RUNTIME
+#ifdef _DEBUG
     /**
      * @brief Process any pending shader DLL reloads (main thread only).
      *
@@ -169,18 +220,29 @@ public:
     bool registerShader(std::string_view name, Def&& def);
 
     /**
-     * @brief Get a compiled shader by name
+     * @brief Resolve a shader name into a typed handle (one-time cost)
      *
-     * Searches BOTH static shaders AND DLL-loaded shaders.
-     * Returns the first match found.
-     *
-     * @tparam ShaderT The shader type
+     * @tparam dim Shader dimension
+     * @tparam Args Shader argument prototype types
      * @param name Shader identifier
-     * @return Reference to the compiled shader
-     * @throws std::runtime_error if shader not found
+     * @return Handle for use with shader(handle, args...); valid() is false
+     *         if the name cannot be resolved yet
+     */
+    template<uint dim, typename... Args>
+    [[nodiscard]] ShaderHandle<dim, Args...> resolve(std::string_view name) const noexcept;
+
+    /**
+     * @brief Dispatch a resolved shader handle
+     *
+     * Resolves the handle on first use and re-resolves after any registry
+     * mutation (registration, clear, DLL hot-reload) or assign() — steady
+     * state is a generation compare. Searches BOTH static and DLL-loaded
+     * shaders.
+     *
+     * @throws std::runtime_error if the shader cannot be resolved
      */
     template<uint dim, typename... Args, typename... CallArgs>
-    [[nodiscard]] auto shader(std::string_view name, CallArgs &&...call_args) const noexcept;
+    [[nodiscard]] auto shader(ShaderHandle<dim, Args...> &handle, CallArgs &&...call_args) const;
 
     /**
      * @brief Register a helper callable for use in shaders
@@ -225,6 +287,7 @@ private:
     // Template implementation for loadShader (must be in header)
     template<uint dim>
     bool loadShaderImpl(IShaderGenerator<dim>& generator, bool hotReload) {
+        newtype::detail::engineAbiCheck();
         if (!sDevice) {
             logError("ShaderManager: Device not set. Call from Renderer context.");
             return false;
@@ -232,8 +295,8 @@ private:
 
         auto name = generator.getName();
 
-#ifdef RT_RUNTIME
-        if(!hotReload)
+#ifdef _DEBUG
+        if (!hotReload)
 #endif
         {
             // Static compilation path
@@ -246,9 +309,10 @@ private:
                     entry.kernel    = std::move(compiled);
                     entry.valid     = true;
                     _shaders[name]  = std::move(entry);
+                    ++_generation;
                 }
 
-                CI_LOG_I("ShaderManager: Loaded shader '" << name << "' (static compilation)");
+                CI_LOG_D("ShaderManager: Loaded shader '" << name << "' (static compilation)");
                 return true;
             } catch (const std::exception& e) {
                 logError("Failed to compile shader '" + name + "': " + e.what());
@@ -256,28 +320,40 @@ private:
             }
         }
 
-#ifdef RT_RUNTIME
-        if (_dllLoaders.find(name) != _dllLoaders.end()) {
-            logError("Shader '" + name + "' already loaded as DLL");
-            return false;
+#ifdef _DEBUG
+        {
+            std::lock_guard dllLock(_dllMutex);
+            if (_dllLoaders.find(name) != _dllLoaders.end()) {
+                logError("Shader '" + name + "' already loaded as DLL");
+                return false;
+            }
         }
 
         auto projPath = "../runtime_shaders/" + name + "Shader/" + name;
         // Create DLL loader for this shader
-        _dllLoaders[name] = std::make_unique<runtime::DLLHotReload>(
+        auto loader = std::make_unique<runtime::DLLHotReload>(
             name,
             "build/Runtime/x64/Debug_Runtime/" + name + "Shader.dll",
             projPath + "Shader.vcxproj",
             projPath + "Shader.cpp"
         );
 
-        if (!_dllLoaders[name]->load(*sDevice)) {
-            logError("Failed to load DLL shader '" + name + "': " + _dllLoaders[name]->getLastError());
-            _dllLoaders.erase(name);
+        if (!loader->load(*sDevice)) {
+            logError("Failed to load DLL shader '" + name + "': " + loader->getLastError());
             return false;
         }
 
-        CI_LOG_I("ShaderManager: Loaded shader '" << name << "' as DLL (hot-reload enabled)");
+        // The watch thread starts with the first DLL shader load and only
+        // polls loaded DLLs — apps that never load a shader DLL (plain Debug
+        // default) never pay for it.
+        launch();
+
+        {
+            std::lock_guard dllLock(_dllMutex);
+            _dllLoaders[name] = std::move(loader);
+        }
+
+        CI_LOG_D("ShaderManager: Loaded shader '" << name << "' as DLL (hot-reload enabled)");
         return true;
 #endif
     }
@@ -288,14 +364,19 @@ private:
         bool valid = false; // True if compilation succeeded
     };
 
-    // Runtime-specific members
-#ifdef RT_RUNTIME
+    // Runtime-specific members (compiled into every _DEBUG binary so the
+    // prebuilt Debug lib serves Debug_Runtime consumers; inert unless a
+    // shader DLL is actually loaded)
+#ifdef _DEBUG
     void stopWatchThread();
     void watchThreadFunc();
     std::thread _watchThread;
     std::atomic<bool> _running{false};
 
-    // DLL hot-reload manager (for runtime shader DLLs)
+    // DLL hot-reload manager (for runtime shader DLLs). Guarded by
+    // _dllMutex: mutated on the main thread (load/clear), iterated by the
+    // watch thread once the first DLL shader load has started it.
+    mutable std::mutex _dllMutex;
     std::unordered_map<std::string, runtime::DllRef> _dllLoaders;
 #endif
 
@@ -309,6 +390,17 @@ private:
     // Members
     mutable std::mutex _shadersMutex;
     std::unordered_map<std::string, ShaderEntry> _shaders;
+
+    // Registry epoch: bumped on every mutation (register, load, clear, DLL
+    // reload) to invalidate outstanding ShaderHandle pointers. Main thread
+    // only — see ShaderHandle.
+    uint32_t _generation = 1u;
+
+    // Static map first, then DLL hot-reload shaders (RT_RUNTIME); null +
+    // error log when unresolvable.
+    template<uint dim, typename... Args>
+    [[nodiscard]] const luisa::compute::Shader<dim, Args...> *
+    _lookup_shader(std::string_view name) const noexcept;
 
     mutable std::mutex _callablesMutex;
     std::unordered_map<std::string, std::any> _callables;  // Stores Callable<Ts...>
@@ -339,42 +431,64 @@ bool ShaderManager::registerShader(std::string_view name, Def&& def) {
     entry.valid     = true;
 
     _shaders[std::string(name)] = std::move(entry);
-    CI_LOG_I("ShaderManager: Registered shader '" << name << "' (static)");
+    ++_generation;
+    CI_LOG_D("ShaderManager: Registered shader '" << name << "' (static)");
     return true;
 }
 
-template<uint dim, typename... Args, typename... CallArgs>
-auto ShaderManager::shader(std::string_view name, CallArgs &&...call_args) const noexcept {
-    
-    auto it = _shaders.find(std::string(name));
-    if (it != _shaders.end()) {
-        if (!it->second.valid) {
-            logError("Shader '" + std::string(name) + "' is invalid (compilation failed)");
-            throw std::runtime_error("Shader '" + std::string(name) + "' is invalid");
-        }
-        
-        // if found, return shader
-        auto shader = dynamic_cast<const luisa::compute::Shader<dim, Args...>*>(
-            it->second.kernel.get());
-        return (*shader)(std::forward<CallArgs>(call_args)...);
-    }
-
-#ifdef RT_RUNTIME
-    // If not found in static shaders, check DLL shaders
+template<uint dim, typename... Args>
+const luisa::compute::Shader<dim, Args...> *
+ShaderManager::_lookup_shader(std::string_view name) const noexcept {
     {
-        auto dllIt = _dllLoaders.find(std::string(name));
-        if (dllIt != _dllLoaders.end()) {
-            if (dllIt->second->isLoaded()) {
-                auto shader = dllIt->second->template getShader<dim, Args...>();
-                if(shader) return (*shader)(std::forward<CallArgs>(call_args)...);
+        std::lock_guard lock(_shadersMutex);
+        auto it = _shaders.find(std::string(name));
+        if (it != _shaders.end()) {
+            if (!it->second.valid) {
+                logError("Shader '" + std::string(name) + "' is invalid (compilation failed)");
+                return nullptr;
             }
+            auto shader = dynamic_cast<const luisa::compute::Shader<dim, Args...> *>(
+                it->second.kernel.get());
+            if (shader == nullptr)
+                logError("Shader '" + std::string(name) + "' has a mismatched prototype");
+            return shader;
+        }
+    }
+#ifdef _DEBUG
+    {
+        std::lock_guard dllLock(_dllMutex);
+        auto dllIt = _dllLoaders.find(std::string(name));
+        if (dllIt != _dllLoaders.end() && dllIt->second->isLoaded()) {
+            return dllIt->second->template getShader<dim, Args...>();
         }
     }
 #endif
-
-    // Not found anywhere
     logError("Shader not found: " + std::string(name));
-    throw std::runtime_error("Shader not found: " + std::string(name));
+    return nullptr;
+}
+
+template<uint dim, typename... Args>
+ShaderHandle<dim, Args...> ShaderManager::resolve(std::string_view name) const noexcept {
+    ShaderHandle<dim, Args...> handle;
+    handle._name = name;
+    handle._shader = _lookup_shader<dim, Args...>(name);
+    handle._generation = _generation;
+    return handle;
+}
+
+template<uint dim, typename... Args, typename... CallArgs>
+auto ShaderManager::shader(ShaderHandle<dim, Args...> &handle, CallArgs &&...call_args) const {
+    // Header/lib ABI guard (prebuilt distro): fires once per process on the
+    // first dispatch through this path; a no-op compare when macros match.
+    newtype::detail::engineAbiCheck();
+    if (handle._shader == nullptr || handle._generation != _generation) {
+        handle._shader = _lookup_shader<dim, Args...>(handle._name);
+        handle._generation = _generation;
+        if (handle._shader == nullptr)
+            throw std::runtime_error(
+                "ShaderManager: cannot resolve shader '" + handle._name + "'");
+    }
+    return (*handle._shader)(std::forward<CallArgs>(call_args)...);
 }
 
 template<typename CallableT>

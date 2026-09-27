@@ -37,7 +37,7 @@ namespace newtype::util {
 		uint32_t numVert = triMesh.getNumVertices();
 		uint32_t numTri  = triMesh.getNumTriangles();
 
-		CI_LOG_I("Packing mesh: " << numVert << " vertices, " << numTri << " triangles");
+		CI_LOG_D("Packing mesh: " << numVert << " vertices, " << numTri << " triangles");
 
 		//----------------------------------------------------------------------
 		// Ensure required attributes exist
@@ -70,11 +70,30 @@ namespace newtype::util {
 		}
 
 		//----------------------------------------------------------------------
+		// Triangles from the index stream, then weld bit-identical duplicates
+		// (A1) — bit-identical rendering, smaller buffers.
+		//----------------------------------------------------------------------
+		std::vector<Triangle> triangles(numTri);
+		const auto& indices = triMesh.getIndices();
+		for (uint32_t i = 0; i < numTri; i++) {
+			triangles[i] = Triangle{ indices[3u * i + 0u], indices[3u * i + 1u], indices[3u * i + 2u] };
+		}
+		if (const size_t removed = weld_vertices(vertices, triangles); removed > 0u) {
+			numVert = static_cast<uint32_t>(vertices.size());
+			CI_LOG_I("Mesh::pack: welded " << removed << " duplicate vertices ("
+				<< numVert << " remain)");
+		}
+
+		//----------------------------------------------------------------------
 		// Create buffers
 		//----------------------------------------------------------------------
-		mVertexBuffer   = device.create_buffer<Vertex>(numVert);
+		mVertexBuffer   = device.create_buffer<util::ActiveVertex>(numVert);
 		compute::Buffer<Triangle> triangleBuffer = device.create_buffer<Triangle>(numTri);
 		auto& stream = core::Renderer::stream();
+
+		// A2: upload stages through the active GPU layout (fp32 identity).
+		util::upload_vertex_buffer(
+			mVertexBuffer, std::span<const Vertex>{vertices}, stream);
 
 		// Extract positions for legacy buffer
 		if (mRequirePosBuffer) {
@@ -82,13 +101,11 @@ namespace newtype::util {
 			std::vector<luisa::float3> positionsOnly(numVert);
 			for (uint32_t i = 0; i < numVert; i++)
 				positionsOnly[i] = vertices[i].position();
-			stream << mVertexBuffer.copy_from(vertices.data())
-				<< mPositionBuffer.copy_from(positionsOnly.data())
-				<< triangleBuffer.copy_from(triMesh.getIndices().data())
+			stream << mPositionBuffer.copy_from(positionsOnly.data())
+				<< triangleBuffer.copy_from(triangles.data())
 				<< synchronize();
 		} else {
-			stream << mVertexBuffer.copy_from(vertices.data())
-				<< triangleBuffer.copy_from(triMesh.getIndices().data())
+			stream << triangleBuffer.copy_from(triangles.data())
 				<< synchronize();
 		}
 
@@ -99,7 +116,7 @@ namespace newtype::util {
 		stream << mMesh.build() << synchronize();
 
 		mPacked = true;
-		CI_LOG_D("Mesh packed successfully with " << sizeof(Vertex) << " byte vertices");
+		CI_LOG_D("Mesh packed successfully with " << sizeof(util::ActiveVertex) << " byte vertices");
 		return mMesh;
 	}
 

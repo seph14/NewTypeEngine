@@ -1,4 +1,7 @@
 #include "newtype/util/LutLoader.h"
+#include "cinder/Utilities.h"
+#include "cinder/DataSource.h"
+#include "cinder/app/App.h"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -6,15 +9,15 @@
 
 namespace newtype::util {
 
-LutData loadCubeLut(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file.is_open())
-        throw std::runtime_error("Failed to open LUT file: " + path.string());
+namespace {
 
+// Text parser shared by every entry point. `name` labels error messages.
+LutData parseCubeText(const std::string& text, const std::string& name) {
     LutData result;
     std::string line;
 
-    while (std::getline(file, line)) {
+    std::istringstream lines(text);
+    while (std::getline(lines, line)) {
         // Strip leading whitespace
         auto pos = line.find_first_not_of(" \t\r\n");
         if (pos == std::string::npos) continue;
@@ -28,7 +31,7 @@ LutData loadCubeLut(const std::filesystem::path& path) {
             std::istringstream iss(line.substr(11));
             iss >> result.size;
             if (result.size == 0)
-                throw std::runtime_error("Invalid LUT_3D_SIZE in: " + path.string());
+                throw std::runtime_error("Invalid LUT_3D_SIZE in: " + name);
             continue;
         }
         if (line.rfind("TITLE", 0) == 0) {
@@ -59,14 +62,54 @@ LutData loadCubeLut(const std::filesystem::path& path) {
     uint32_t expected = result.size * result.size * result.size * 3u;
     if (result.data.size() * 3 / 4 != expected)
         throw std::runtime_error(
-            "LUT data size mismatch in " + path.string() +
+            "LUT data size mismatch in " + name +
             ": expected " + std::to_string(expected) +
             " floats, got " + std::to_string(result.data.size() * 3 / 4));
 
     if (result.size == 0)
-        throw std::runtime_error("No LUT_3D_SIZE found in: " + path.string());
+        throw std::runtime_error("No LUT_3D_SIZE found in: " + name);
 
     return result;
 }
 
-} // namespace newtype::core
+} // namespace
+
+LutData loadCubeLut(const std::filesystem::path& path) {
+    const auto name = path.string();
+    try {
+        return parseCubeText(ci::loadString(ci::loadFile(path)), name);
+    } catch (const std::runtime_error&) {
+        throw;  // parse errors pass through untouched
+    } catch (const std::exception&) {
+        throw std::runtime_error("Failed to open LUT file: " + name);
+    }
+}
+
+LutData loadAsset(const std::filesystem::path& assetPath) {
+    const auto name = assetPath.string();
+    try {
+        return parseCubeText(ci::loadString(ci::app::loadAsset(name)), name);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const std::exception&) {
+        throw std::runtime_error("Failed to open LUT file: " + name);
+    }
+}
+
+LutData loadResource(
+    const std::filesystem::path& resourcePath,
+    int mswID,
+    const std::string& mswType) {
+
+    const auto name = resourcePath.string();
+    try {
+        return parseCubeText(
+            ci::loadString(ci::app::loadResource(resourcePath, mswID, mswType)), name);
+    } catch (const std::runtime_error&) {
+        throw;
+    } catch (const std::exception&) {
+        throw std::runtime_error("Failed to open LUT file: " + name);
+    }
+}
+
+} // namespace newtype::util

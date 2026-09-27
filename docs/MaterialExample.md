@@ -1,6 +1,62 @@
 # Material & Texture Examples
 
-Two methods for creating materials with textures in NewTypeEngine.
+Two methods for creating materials with textures in NewTypeEngine, plus a
+reference of the built-in material types and the 4-layer material system.
+
+---
+
+## Material Types (render/Material.h)
+
+All helpers return a `render::MaterialData` for `pipeline.addMaterial(name, data)`
+(or `MaterialPool::createMaterial`). Layered features (clearcoat, sheen,
+iridescence, anisotropy, dispersion) can also be packed as modifier layers —
+see below.
+
+| Helper | Type | Key parameters |
+|--------|------|----------------|
+| `make_diffuse` | Diffuse | albedo, roughness |
+| `make_conductor` | Conductor | albedo, roughness, (anisotropy) |
+| `make_dielectric` | Dielectric | attenuation, ior, roughness, interior_priority, **dispersion** (KHR dispersion; >0 splits wavelengths) |
+| `make_thin_dielectric` | ThinDielectric | attenuation, ior, roughness — cheap glass without refraction volume |
+| `make_plastic` | Plastic | albedo, roughness, ior, clearcoat, clearcoat_gloss |
+| `make_emissive` | Emissive | emission color |
+| `make_subsurface` | Subsurface | albedo, roughness, flatness, attenuation, diffuse_trans, ior — thin-wall HK lobe |
+| `make_paper` | Subsurface preset | diffuse_trans, attenuation_distance |
+| `make_sheen` | Sheen | albedo, roughness, sheen, sheen_tint |
+| `make_clearcoat` | Clearcoat modifier | clearcoat, clearcoat_gloss, ior |
+| `make_iridescence` | Iridescence modifier | iridescence, ior, thickness, thickness_max (texture-driven when max > 0) |
+| `make_anisotropy` | Anisotropy modifier | anisotropic, rotation |
+| `make_unlit` | Unlit | albedo — raw emission-free display color |
+| `make_fabric` | Fabric | albedo, roughness, fabric, sheen, sheen_tint |
+
+```cpp
+// Dispersion example — dispersive glass
+uint glass = pipeline.addMaterial("glass",
+    render::make_dielectric(luisa::make_float3(1.f), 1.52f, 0.f, 0.f, 0.4f));
+
+// Iridescence example
+uint soap = pipeline.addMaterial("soap",
+    render::make_iridescence(1.f, 1.3f, 400.f, 800.f));
+```
+
+Custom material types (type >= 14) via DLL callables: see
+docs/custom_material_callables.md and docs/examples/custom_material_callables.md.
+
+## 4-Layer Material Packing
+
+Every shape carries `_material_layers` — four 8-bit material indices packed
+in one uint32: **layer 0 = base BSDF, layers 1–3 = modifiers** (e.g. clearcoat,
+sheen, iridescence on top of a diffuse base). `0xFF` disables a layer.
+
+```cpp
+auto mesh = scene::MeshShape::create(device, /*layer0=*/diffuseIdx);
+mesh->set_layer(1, clearcoatIdx);   // + clearcoat
+mesh->set_layer(2, sheenIdx);       // + sheen
+mesh->set_layer(3, 0xFFu);          // unused
+// or set all four at once: mesh->set_material_layers(packed);
+```
+
+Details and lobe combination rules: docs/material_layer.md.
 
 ---
 

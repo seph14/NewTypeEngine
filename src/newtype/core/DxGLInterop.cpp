@@ -17,6 +17,17 @@ DxGLInterop::DxGLInterop(ID3D12Device* device, uint32_t width, uint32_t height,
 }
 
 DxGLInterop::~DxGLInterop() {
+    // Drain the last copy before tearing the queue/fence down — destroying
+    // a queue with pending work is refcount-deferred by the runtime, but the
+    // shared texture is released here too and GL may still hold the fence.
+    if (_valid && _copyQueue != nullptr && _fence != nullptr) {
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (ev != nullptr) {
+            if (SUCCEEDED(_fence->SetEventOnCompletion(_fenceValue, ev)))
+                WaitForSingleObject(ev, 2000);
+            CloseHandle(ev);
+        }
+    }
     _destroy_resources();
 }
 
@@ -205,7 +216,7 @@ void DxGLInterop::_create_resources() {
         true);  // doNotDispose — we manage the GL texture ourselves
 
     _valid = true;
-    CI_LOG_I("DxGLInterop: Created " << _width << "x" << _height
+    CI_LOG_D("DxGLInterop: Created " << _width << "x" << _height
         << " shared texture (DXGI=0x" << std::hex << _dxFormat
         << ", GL=0x" << _glFormat << std::dec << ")");
 }
@@ -240,6 +251,21 @@ void DxGLInterop::_destroy_resources() {
 void DxGLInterop::copy_to_gl(ID3D12Resource* source,
                              uint32_t width, uint32_t height) {
     if (!_valid) return;
+
+    // The previous copy on THIS interop's queue may still be executing
+    // (wait_for_copy only orders the GL side — the CPU never blocked). The
+    // allocator/list cannot be reset until the GPU finished it; resetting an
+    // in-flight list corrupts it and wedges the GPU (DEVICE_HUNG, no page
+    // fault — resize TDR 2026-09-16). Copies are tiny; this wait is ~free.
+    if (_fenceValue > 0 && _fence != nullptr &&
+        _fence->GetCompletedValue() < _fenceValue) {
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (ev != nullptr) {
+            if (SUCCEEDED(_fence->SetEventOnCompletion(_fenceValue, ev)))
+                WaitForSingleObject(ev, 2000);
+            CloseHandle(ev);
+        }
+    }
 
     // Reset command allocator and command list
     _cmdAlloc->Reset();

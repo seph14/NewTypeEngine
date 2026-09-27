@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <numeric>
 #include <numbers>
+#include <tuple>
+#include <utility>
 
 namespace newtype::render {
 
@@ -87,7 +89,7 @@ void EnvironmentLight::build_cdfs(const float* rgba_data, Stream &stream) noexce
     stream << _cdfs_buffer_conditional.copy_from(conditional_cdf.data());
 
     _built = true;
-    CI_LOG_I("EnvironmentLight built: " << _width << "x" << _height
+    CI_LOG_D("EnvironmentLight built: " << _width << "x" << _height
         << ", integral=" << integral);
 }
 
@@ -136,7 +138,11 @@ void EnvironmentLight::set_elevation(float elev_rad) noexcept {
     _update_rotation();
 }
 
-void EnvironmentLight::update_rotation_buffer(Stream &stream) noexcept {
+// Returns true when a new rotation matrix was queued on `stream` this call —
+// callers with GPU consumers of the rotation buffer (env-presampled candidates
+// store rotation-dependent directions/pdf) must order behind the upload and
+// refresh their cached state.
+bool EnvironmentLight::update_rotation_buffer(Stream &stream) noexcept {
     if (!_rotationBuffer) {
         _rotationBuffer = _device.create_buffer<luisa::float3x3>(1u);
         _rotationDirty = true;
@@ -144,7 +150,9 @@ void EnvironmentLight::update_rotation_buffer(Stream &stream) noexcept {
     if (_rotationDirty) {
         stream << _rotationBuffer.copy_from(&_rotationMatrix);
         _rotationDirty = false;
+        return true;
     }
+    return false;
 }
 
 //==============================================================================
@@ -288,7 +296,7 @@ void EnvironmentLight::generate_procedural_sky(Stream &stream, uint width, uint 
     _isProcedural = true;
     build_cdfs(pixels.data(), stream);
 
-    CI_LOG_I("EnvironmentLight: Procedural sky generated (" << width << "x" << height
+    CI_LOG_D("EnvironmentLight: Procedural sky generated (" << width << "x" << height
         << ", elev=" << (_elevation * 180.0f / pi) << "deg"
         << ", turb=" << _turbidity << ")");
 }
@@ -378,7 +386,11 @@ void LightSampler::update_weights(Stream &stream, const MaterialPool &material_p
                                   const scene::Geometry &geometry) noexcept {
     if (_emissive_tris_cpu.empty()) return;
 
-    _total_power = 0.0f;
+    // Accumulate in double, round once: build_alias_table_cpu normalizes by
+    // the double sum of the same powers, and the claimed pdf
+    // (power * _total_power_inv) must stay anchored to that same total or
+    // every light picks up the float-summation error as a uniform bias.
+    double total_power = 0.0;
     for (auto &rec : _emissive_tris_cpu) {
         const auto &material = material_pool.getMaterial(rec.material_index);
         luisa::float3 emission = material.data.emission;
@@ -388,8 +400,9 @@ void LightSampler::update_weights(Stream &stream, const MaterialPool &material_p
         // from sampling. Allows cheap updates on visibility toggles.
         float base_power = luminance_val * rec.area;
         rec.power = geometry.is_instance_visible(rec.instance_id) ? base_power : 0.0f;
-        _total_power += rec.power;
+        total_power += rec.power;
     }
+    _total_power = static_cast<float>(total_power);
     _total_power_inv = (_total_power > 0.0f) ? (1.0f / _total_power) : 0.0f;
 
     _build_alias_table(stream);
@@ -407,7 +420,7 @@ void LightSampler::update_transforms(Stream &stream, const scene::Geometry &geom
     if (scale_changed) {
         // Full recompute: areas, powers, alias table, vertices
         _light_staging.resize(n);
-        _total_power = 0.0f;
+        double total_power = 0.0; // double-accumulate, round once (see update_weights)
 
         for (uint i = 0; i < n; ++i) {
             auto &rec = _emissive_tris_cpu[i];
@@ -420,8 +433,12 @@ void LightSampler::update_transforms(Stream &stream, const scene::Geometry &geom
             luisa::float3 emission = material.data.emission;
             float luminance_val = dot(emission, make_float3(0.2126f, 0.7152f, 0.0722f));
             rec.emission = emission;
-            rec.power = luminance_val * rec.area;
-            _total_power += rec.power;
+            // Zero power for hidden instances (matches update_weights):
+            // without this guard a scale change on a hidden light resurrects
+            // its alias-table sampling power behind set_visibility(false).
+            float base_power = luminance_val * rec.area;
+            rec.power = geometry.is_instance_visible(rec.instance_id) ? base_power : 0.0f;
+            total_power += rec.power;
 
             _light_staging[i].instance_id    = rec.instance_id;
             _light_staging[i].primitive_id   = rec.primitive_id;
@@ -440,6 +457,7 @@ void LightSampler::update_transforms(Stream &stream, const scene::Geometry &geom
             _light_staging[i].nz = ln.z;
         }
 
+        _total_power = static_cast<float>(total_power);
         _total_power_inv = (_total_power > 0.0f) ? (1.0f / _total_power) : 0.0f;
 
         // Fill pdfs after total_power is known
@@ -487,7 +505,10 @@ void LightSampler::_collect_emissive_tris(
     const MaterialPool &material_pool) noexcept {
 
     _emissive_tris_cpu.clear();
-    _total_power = 0.0f;
+    // Double-accumulate, round once (see update_weights): the alias table
+    // normalizes by this same sum, so claimed pdf and realized selection
+    // probability must not drift apart by the float-summation error.
+    double total_power = 0.0;
 
     uint global_tri_index = 0;
 
@@ -496,8 +517,13 @@ void LightSampler::_collect_emissive_tris(
     for (uint idx : geometry.light_indices()) {
         const auto *shape = instances[idx].get_shape();
 
+        // Per-INSTANCE layer-0 material (B1): the instance's own layer pack,
+        // not the shape's — prototype instances may override the prototype.
+        const uint mat_idx = instances[idx]._material_layers & 0xFFu;
+
         // skip dark geom
-        const auto &material = material_pool.getMaterial(shape->material_id());
+        if (mat_idx == 0xFFu) continue;  // layer unused
+        const auto &material = material_pool.getMaterial(mat_idx);
         float3 emission = material.data.emission;
         float luminance_val = dot(emission, make_float3(0.2126f, 0.7152f, 0.0722f));
         if (luminance_val <= 0.001f) continue;
@@ -531,10 +557,10 @@ void LightSampler::_collect_emissive_tris(
             tri.area = area;
             tri.emission = emission;
             tri.power = power;
-            tri.material_index = shape->material_id();
+            tri.material_index = mat_idx;
 
             _emissive_tris_cpu.push_back(tri);
-            _total_power += power;
+            total_power += power;
         }
     }
 
@@ -543,8 +569,13 @@ void LightSampler::_collect_emissive_tris(
         const auto *shape = instance.get_shape();
         if (!shape || shape->properties() & scene::PROPERTY_HAS_LIGHT) { tlas_idx++; continue; }
 
+        // Per-INSTANCE layer-0 material (B1) — same rule as the light-flagged
+        // scan above: prototype instances carry their own layer pack.
+        const uint mat_idx = instance._material_layers & 0xFFu;
+        if (mat_idx == 0xFFu) { tlas_idx++; continue; }  // layer unused
+
         // skip dark geom
-        const auto &material = material_pool.getMaterial(shape->material_id());
+        const auto &material = material_pool.getMaterial(mat_idx);
         float3 emission = material.data.emission;
         float luminance_val = dot(emission, make_float3(0.2126f, 0.7152f, 0.0722f));
         if (luminance_val <= 0.001f) { tlas_idx++; continue; }
@@ -573,16 +604,17 @@ void LightSampler::_collect_emissive_tris(
             tri.area = area;
             tri.emission = emission;
             tri.power = power;
-            tri.material_index = shape->material_id();
+            tri.material_index = mat_idx;
 
             _emissive_tris_cpu.push_back(tri);
-            _total_power += power;
+            total_power += power;
         }
         tlas_idx++;
     }
 
     _total_emissive_count = static_cast<uint>(_emissive_tris_cpu.size());
     _total_emissive_count_float = static_cast<float>(_total_emissive_count);
+    _total_power = static_cast<float>(total_power);
     _total_power_inv = (_total_power > 0.0f) ? (1.0f / _total_power) : 0.0f;
     _emissive_count_inv = (_total_emissive_count > 0u) ? (1.0f / _total_emissive_count_float) : 0.0f;
 
@@ -667,75 +699,96 @@ void LightSampler::_get_triangle_vertices(
 // Alias Table Construction (Vose's Algorithm)
 //==============================================================================
 
+luisa::vector<AliasEntry> LightSampler::build_alias_table_cpu(
+    const float *weights, size_t count, bool uniform_sampling) noexcept {
+
+    luisa::vector<AliasEntry> alias_table(count);
+    if (count == 0u) return alias_table;
+
+    auto set_entry = [&](size_t i, uint alias_index, float pdf) noexcept {
+        alias_table[i].alias_index    = alias_index;
+        alias_table[i].pdf            = pdf;
+        alias_table[i].triangle_index = static_cast<uint>(i);
+        alias_table[i].padding        = 0u;
+    };
+
+    if (count == 1u) {
+        set_entry(0u, 0u, 1.0f);
+        return alias_table;
+    }
+
+    // Clamp negatives/NaN to zero first: a NaN would slip past the residual
+    // comparisons (both go false) and corrupt the bucket it lands in.
+    luisa::vector<float> clamped(count);
+    double total = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        float w = uniform_sampling ? 1.0f : weights[i];
+        if (!(w > 0.0f)) w = 0.0f;
+        clamped[i] = w;
+        total += w;
+    }
+
+    // All-zero weights (e.g. every light hidden): avg = 1 keeps the table
+    // well-formed; zero-power entries remain excluded downstream via their
+    // TriangleLight::pdf == 0.
+    const float avg = (total > 0.0)
+        ? static_cast<float>(total / static_cast<double>(count))
+        : 1.0f;
+    const float avg_inv = 1.0f / avg;
+
+    // Vose's algorithm. Worklists carry (index, residual) — the weight not
+    // yet placed into a bucket. Each pairing fills the small item's bucket:
+    // its residual selects itself, the remainder aliases to a large partner
+    // whose residual shrinks by exactly that amount. Carrying the residual is
+    // essential — recomputing weights from the original power at every pop
+    // re-inflates donors, misroutes worklist membership and can even produce
+    // bucket pdfs > 1, so the realized selection distribution drifts away
+    // from power/total, which every consumer assumes when it divides by
+    // TriangleLight::pdf.
+    luisa::vector<std::pair<uint, float>> small, large;
+    small.reserve(count);
+    large.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        float residual = clamped[i] * avg_inv;
+        if (residual < 1.0f) small.emplace_back(static_cast<uint>(i), residual);
+        else                 large.emplace_back(static_cast<uint>(i), residual);
+    }
+
+    while (!small.empty() && !large.empty()) {
+        auto [l, l_resid] = small.back();
+        auto [g, g_resid] = large.back();
+        small.pop_back();
+        large.pop_back();
+
+        set_entry(l, g, std::min(l_resid, 1.0f));
+
+        // g donates (1 - l_resid) of a bucket from its residual.
+        const float g_resid_new = (g_resid + l_resid) - 1.0f;
+        if (g_resid_new < 1.0f) small.emplace_back(g, g_resid_new);
+        else                    large.emplace_back(g, g_resid_new);
+    }
+
+    // Each pop fills one bucket exactly and mass is conserved, so exact
+    // arithmetic leaves every leftover with residual == 1.0 — a full
+    // self-alias bucket is the correct close-out and only float drift
+    // remains. (Reaching this with genuinely below-average residuals is
+    // impossible once residuals are carried; that was the old close-out bug.)
+    for (auto [g, resid] : large) { (void)resid; set_entry(g, g, 1.0f); }
+    for (auto [l, resid] : small) { (void)resid; set_entry(l, l, 1.0f); }
+
+    return alias_table;
+}
+
 void LightSampler::_build_alias_table(Stream &stream) noexcept {
     uint n = _total_emissive_count;
     if (n == 0) return;
 
-    luisa::vector<AliasEntry> alias_table(n);
+    luisa::vector<float> weights(n);
+    for (uint i = 0; i < n; ++i)
+        weights[i] = _uniform_sampling ? 1.0f : _emissive_tris_cpu[i].power;
 
-    if (n == 1) {
-        alias_table[0].alias_index = 0;
-        alias_table[0].triangle_index = 0u;
-        alias_table[0].pdf = 1.0f;
-        alias_table[0].padding = 0;
-        if (!_alias_table || _alias_table.size() != n)
-            _alias_table = _device.create_buffer<AliasEntry>(n);
-        stream << _alias_table.copy_from(alias_table.data());
-        return;
-    }
-
-    float avg_power = (_uniform_sampling || _total_power == 0.0f) ? 1.0f : (_total_power / static_cast<float>(n));
-    float avg_power_inv = 1.0f / avg_power;
-
-    luisa::vector<size_t> small, large;
-
-    for (size_t i = 0; i < n; ++i) {
-        float weight = _uniform_sampling ? 1.0f : _emissive_tris_cpu[i].power;
-        float scaled_power = weight * avg_power_inv;
-
-        if (scaled_power < 1.0f) {
-            small.push_back(i);
-        } else {
-            large.push_back(i);
-        }
-    }
-
-    while (!small.empty() && !large.empty()) {
-        size_t l = small.back();
-        size_t g = large.back();
-        small.pop_back();
-        large.pop_back();
-
-        float l_weight = _uniform_sampling ? 1.0f : _emissive_tris_cpu[l].power;
-        float g_weight = _uniform_sampling ? 1.0f : _emissive_tris_cpu[g].power;
-
-        alias_table[l].triangle_index = static_cast<uint>(l);
-        alias_table[l].alias_index = static_cast<uint>(g);
-        alias_table[l].pdf = l_weight * avg_power_inv;
-        alias_table[l].padding = 0;
-
-        float new_power = (g_weight + l_weight) - avg_power;
-
-        if (new_power < avg_power) {
-            small.push_back(g);
-        } else {
-            large.push_back(g);
-        }
-    }
-
-    for (size_t g : large) {
-        alias_table[g].triangle_index = static_cast<uint>(g);
-        alias_table[g].alias_index = static_cast<uint>(g);
-        alias_table[g].pdf = 1.0f;
-        alias_table[g].padding = 0;
-    }
-
-    for (size_t l : small) {
-        alias_table[l].triangle_index = static_cast<uint>(l);
-        alias_table[l].alias_index = static_cast<uint>(l);
-        alias_table[l].pdf = 1.0f;
-        alias_table[l].padding = 0;
-    }
+    auto alias_table = build_alias_table_cpu(weights.data(), n, _uniform_sampling);
 
     if (!_alias_table || _alias_table.size() != n)
         _alias_table = _device.create_buffer<AliasEntry>(n);
@@ -833,11 +886,16 @@ auto LightSampler::sample_light(const Float &u) const noexcept {
     auto entry = _alias_table->read(idx);
     UInt selected_index = ite(u_scaled - cast<float>(idx) < entry.pdf,
         entry.triangle_index, entry.alias_index);
-    Float pdf = entry.pdf * _total_power_inv;
+    // Claim pdf = the selected triangle's power/total — the same value every
+    // consumer divides the contribution by. entry.pdf is the bucket
+    // acceptance probability (n/sum-normalized), NOT a sampling pdf; the old
+    // entry.pdf * _total_power_inv here was dimensionally wrong.
+    auto tri = _triangle_lights->read(selected_index);
+    Float pdf = tri.pdf;
     return std::make_pair(selected_index, pdf);
 }
 
-auto LightSampler::sample_light_with_uv(const Float2 &u) const noexcept {
+auto LightSampler::sample_light_with_uv(const Float3 &u) const noexcept {
     using namespace luisa::compute;
     auto n = _total_emissive_count_float;
     Float u_scaled = u.x * n;
@@ -846,14 +904,21 @@ auto LightSampler::sample_light_with_uv(const Float2 &u) const noexcept {
     auto entry = _alias_table->read(idx);
     UInt selected_index = ite(u_scaled - cast<float>(idx) < entry.pdf,
         entry.triangle_index, entry.alias_index);
+    // u.x drives table selection; u.y/u.z sample the triangle surface with
+    // the sqrt trick (same convention as the DI presample kernel). The old
+    // Float2 signature reused u.x for both, correlating selection and point.
     Float su = sqrt(u.y);
-    Float2 uv = make_float2(1.0f - su, u.x * su);
-    return std::make_pair(selected_index, uv);
+    Float2 uv = make_float2(1.0f - su, u.z * su);
+    auto tri = _triangle_lights->read(selected_index);
+    return std::make_tuple(selected_index, uv, tri.pdf);
 }
 
 Float LightSampler::light_pdf(const UInt &triangle_index) const noexcept {
     if (_total_emissive_count == 0u) return 0.0f;
-    return _total_power_inv;
+    // Claim pdf of the requested triangle (power/total) — the old code
+    // returned _total_power_inv, a different quantity entirely.
+    auto tri = _triangle_lights->read(min(triangle_index, _total_emissive_count - 1u));
+    return tri.pdf;
 }
 
 auto LightSampler::sample_env(const Float2 &u) const noexcept {
@@ -898,7 +963,7 @@ Float3 LightSampler::_sample_triangle(
 
 Buffer<EmissiveTriangle> create_emissive_buffer(
     Device& device,
-    Buffer<util::Vertex> vertices,
+    Buffer<util::ActiveVertex> vertices,
     uint triangleCount,
     const luisa::float3& emissionThreshold) {
     luisa::vector<EmissiveTriangle> emissives;

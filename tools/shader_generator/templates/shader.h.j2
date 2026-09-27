@@ -39,7 +39,9 @@
  *   ShaderManager::instance().loadShader(generator);
  *
  *   // In runtime mode - DLL is loaded automatically
- *   auto& shader = ShaderManager::instance().shader<2, {{ shader_name }}Type::Args...>("{{ function_suffix }}", args...);
+ *   ShaderHandle<2, {{ shader_name }}Type::Args...> _{{ function_suffix }};
+ *   _{{ function_suffix }}.assign("{{ function_suffix }}");   // once, at setup
+ *   stream << ShaderManager::instance().shader(_{{ function_suffix }}, args...).dispatch(w, h);
  * @endcode
  */
 class {{ class_name }} : public newtype::core::IShaderGenerator<2> {

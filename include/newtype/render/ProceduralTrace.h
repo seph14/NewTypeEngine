@@ -59,6 +59,11 @@ using namespace luisa::compute;
 // ProcHitInfo — shared result from procedural intersection
 //==============================================================================
 
+/// Miss sentinel returned as .t by every intersector below. Also caps the
+/// candidate acceptance interval: rays launched with a larger t_max (camera
+/// rays use FLT_MAX) must not accept the sentinel as a hit.
+inline constexpr float kProcMissT = 1e10f;
+
 struct ProcHitInfo {
     Float t;
     UInt  prim;     // VAT: local triangle; Cube: face_id; Sphere: 0
@@ -295,17 +300,31 @@ struct TraceResult {
             auto c_ray = candidate.ray();
             Float3 ray_orig = c_ray->origin();
             Float3 ray_dir = c_ray->direction();
+            // Candidate-ray acceptance interval. t_max() is the query ray's
+            // upper bound, so a commit survives iff t < t_hi — the same bound
+            // _CommitProcedural enforces; t_lo additionally rejects hits
+            // behind RayTMin. The cap at kProcMissT is NOT optional: every
+            // intersector returns t == 1e10f as its MISS sentinel, and camera
+            // rays are created with t_max = FLT_MAX (make_ray 2-arg default),
+            // so a miss would pass `t < t_hi` and commit a phantom hit at
+            // 1e10 wherever the ray crosses an AABB without hitting a
+            // triangle (the env-background bbox artifact).
+            // The manual best_* bookkeeping below must agree with this
+            // interval, otherwise it records hits the hardware rejected
+            // (e.g. a procedural surface just beyond a shadow ray's t_max).
+            Float t_lo = c_ray->t_min();
+            Float t_hi = min(c_ray->t_max(), kProcMissT);
 
             $if((inst.type & 0xFu) == 0u) { // VAT mesh — pre-interpolated, single-frame
                 ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless);
-                $if(hit_info.t < 1e10f) {
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
                     candidate.commit(hit_info.t);
-                };
-                $if(hit_info.t < best_t) {
-                    best_t = hit_info.t;
-                    best_tri = hit_info.prim;
-                    best_bary = hit_info.bary;
-                    best_prim = h.prim;
+                    $if(hit_info.t < best_t) {
+                        best_t = hit_info.t;
+                        best_tri = hit_info.prim;
+                        best_bary = hit_info.bary;
+                        best_prim = h.prim;
+                    };
                 };
             }
             $elif((inst.type & 0xFu) == 1u) { // Sphere
@@ -315,7 +334,7 @@ struct TraceResult {
                 Float radius = extent.x * 0.5f;
 
                 ProcHitInfo hit_info = intersect_sphere(center, radius, ray_orig, ray_dir);
-                $if(hit_info.t < 1e10f) {
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
                     candidate.commit(hit_info.t);
                     $if(hit_info.t < best_t) {
                         best_t = hit_info.t;
@@ -331,7 +350,7 @@ struct TraceResult {
                 Float half_ext = inst.param;
 
                 ProcHitInfo hit_info = intersect_cube(center, half_ext, inst.rotation, ray_orig, ray_dir);
-                $if(hit_info.t < 1e10f) {
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
                     candidate.commit(hit_info.t);
                     $if(hit_info.t < best_t) {
                         best_t = hit_info.t;
@@ -343,14 +362,14 @@ struct TraceResult {
             }
             $else { // Deformable static (type == 3u) — same code path as VAT
                 ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless);
-                $if(hit_info.t < 1e10f) {
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
                     candidate.commit(hit_info.t);
-                };
-                $if(hit_info.t < best_t) {
-                    best_t = hit_info.t;
-                    best_tri = hit_info.prim;
-                    best_bary = hit_info.bary;
-                    best_prim = h.prim;
+                    $if(hit_info.t < best_t) {
+                        best_t = hit_info.t;
+                        best_tri = hit_info.prim;
+                        best_bary = hit_info.bary;
+                        best_prim = h.prim;
+                    };
                 };
             };
         })
@@ -374,70 +393,86 @@ struct TraceResult {
 // trace_occluded: shadow/occlusion trace — returns true if ray hits anything
 //==============================================================================
 
+/// Occlusion is derived from the query's CommittedHit, never from a flag set
+/// inside the candidate handlers:
+///  - Engine meshes are built opaque (D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE /
+///    VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR), so opaque triangles
+///    auto-commit WITHOUT invoking on_surface_candidate — the generated loop
+///    only reports CANDIDATE_NON_OPAQUE_TRIANGLE there. A handler-side flag
+///    would miss mesh blockers entirely and shadow rays would see through all
+///    mesh geometry.
+///  - Procedural analytic hits must land inside the candidate-ray interval
+///    [RayTMin, CommittedRayT) — the same acceptance the hardware enforces on
+///    CommitProceduralPrimitiveHit. The analytic intersectors themselves are
+///    unbounded (they test the infinite ray), and visibility rays deliberately
+///    stop `dist - offset` short of their target: without the t_hi bound, a
+///    procedural target surface sitting just beyond t_max would falsely
+///    occlude its own visibility ray.
 [[nodiscard]] inline Bool trace_occluded(
     const AccelVar& accel,
     Var<compute::Ray> ray,
     const BindlessVar& proc_bindless) noexcept {
 
-    Bool occluded = def(false);
-
-    accel->traverse(ray, {})
+    auto hit = accel->traverse(ray, {})
         .on_surface_candidate([&](SurfaceCandidate& c) noexcept {
-            c.commit(); 
-            occluded = true;  
+            c.commit();
             c.terminate();
         })
         .on_procedural_candidate([&](ProceduralCandidate& candidate) noexcept {
-            $if(!occluded) {
-                Var<ProceduralHit> h = candidate.hit();
-                Var<scene::ProcInstanceData> inst = proc_bindless.buffer<scene::ProcInstanceData>(kSlot_ProcInstances).read(h.prim);
+            Var<ProceduralHit> h = candidate.hit();
+            Var<scene::ProcInstanceData> inst = proc_bindless.buffer<scene::ProcInstanceData>(kSlot_ProcInstances).read(h.prim);
 
-                auto c_ray = candidate.ray();
-                Float3 ray_orig = c_ray->origin();
-                Float3 ray_dir = c_ray->direction();
+            auto c_ray = candidate.ray();
+            Float3 ray_orig = c_ray->origin();
+            Float3 ray_dir = c_ray->direction();
+            // Same acceptance contract as trace_closest: [t_min, t_max) capped
+            // at the intersectors' 1e10f miss sentinel — without the cap a
+            // miss (t == 1e10f) passes on rays with t_max > 1e10 (camera rays
+            // use FLT_MAX) and falsely reports occlusion.
+            Float t_lo = c_ray->t_min();
+            Float t_hi = min(c_ray->t_max(), kProcMissT);
 
-                $if((inst.type & 0xFu) == 0u) { // VAT mesh
-                    ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless, true);
-                    $if(hit_info.t < 1e10f) {
-                        occluded = true;
-                        candidate.commit(hit_info.t);
-                    };
-                }
-                $elif((inst.type & 0xFu) == 1u) { // Sphere
-                    auto aabb = proc_bindless.buffer<compute::AABB>(kSlot_ProcAABBs).read(h.prim);
-                    Float3 center = (aabb->min() + aabb->max()) * 0.5f;
-                    Float3 extent = aabb->max() - aabb->min();
-                    Float radius = extent.x * 0.5f;
+            $if((inst.type & 0xFu) == 0u) { // VAT mesh
+                ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless, true);
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
+                    candidate.commit(hit_info.t);
+                    candidate.terminate();
+                };
+            }
+            $elif((inst.type & 0xFu) == 1u) { // Sphere
+                auto aabb = proc_bindless.buffer<compute::AABB>(kSlot_ProcAABBs).read(h.prim);
+                Float3 center = (aabb->min() + aabb->max()) * 0.5f;
+                Float3 extent = aabb->max() - aabb->min();
+                Float radius = extent.x * 0.5f;
 
-                    ProcHitInfo hit_info = intersect_sphere(center, radius, ray_orig, ray_dir);
-                    $if(hit_info.t < 1e10f) {
-                        occluded = true;
-                        candidate.commit(hit_info.t);
-                    };
-                }
-                $elif((inst.type & 0xFu) == 2u) { // Cube
-                    auto aabb = proc_bindless.buffer<compute::AABB>(kSlot_ProcAABBs).read(h.prim);
-                    Float3 center = (aabb->min() + aabb->max()) * 0.5f;
-                    Float half_ext = inst.param;
+                ProcHitInfo hit_info = intersect_sphere(center, radius, ray_orig, ray_dir);
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
+                    candidate.commit(hit_info.t);
+                    candidate.terminate();
+                };
+            }
+            $elif((inst.type & 0xFu) == 2u) { // Cube
+                auto aabb = proc_bindless.buffer<compute::AABB>(kSlot_ProcAABBs).read(h.prim);
+                Float3 center = (aabb->min() + aabb->max()) * 0.5f;
+                Float half_ext = inst.param;
 
-                    ProcHitInfo hit_info = intersect_cube(center, half_ext, inst.rotation, ray_orig, ray_dir);
-                    $if(hit_info.t < 1e10f) {
-                        occluded = true;
-                        candidate.commit(hit_info.t);
-                    };
-                }
-                $else { // Deformable static (type == 3u)
-                    ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless, true);
-                    $if(hit_info.t < 1e10f) {
-                        occluded = true;
-                        candidate.commit(hit_info.t);
-                    };
+                ProcHitInfo hit_info = intersect_cube(center, half_ext, inst.rotation, ray_orig, ray_dir);
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
+                    candidate.commit(hit_info.t);
+                    candidate.terminate();
+                };
+            }
+            $else { // Deformable static (type == 3u)
+                ProcHitInfo hit_info = intersect_triangles(inst, ray_orig, ray_dir, proc_bindless, true);
+                $if(hit_info.t >= t_lo & hit_info.t < t_hi) {
+                    candidate.commit(hit_info.t);
+                    candidate.terminate();
                 };
             };
         })
         .trace();
 
-    return occluded;
+    return !hit->miss();
 }
 
 //==============================================================================

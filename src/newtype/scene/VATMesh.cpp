@@ -19,14 +19,57 @@ using namespace luisa;
 
 static constexpr const char* kShaderName = "vat_interpolate";
 
+// Resolved once on first dispatch; re-resolved automatically after registry
+// mutations (registration, clear, DLL hot-reload).
+static core::ShaderHandle<1,
+    Buffer<MeshShape::GpuVertex>, Buffer<luisa::float3>, Buffer<luisa::float3>,
+    uint, uint, float, bool> gInterpolateShader;
+
 //==============================================================================
 // Loading
 //==============================================================================
+
+namespace {
+
+// Move a parsed VATData into a sequence slot at the given global frame offset
+void fill_sequence(VATSequence& seq, util::VATData&& data, uint32_t frame_offset) noexcept {
+    seq.vertex_count = data.vertex_count;
+    seq.frame_count  = data.frame_count;
+    seq.index_count  = data.index_count;
+    seq.indices      = std::move(data.indices);
+    seq.texcoords    = std::move(data.texcoords);
+    seq.positions    = std::move(data.positions);
+    seq.normals      = std::move(data.normals);
+    seq.frame_offset = frame_offset;
+}
+
+} // namespace
 
 bool VATMesh::load_folder(const std::filesystem::path& folder_path,
                            const std::string& base_name) noexcept {
     _sequences.clear();
     _name = base_name;
+
+    // Packed V1 takes precedence: a single <base>.vat holding every topology
+    auto packed_path = folder_path / (base_name + ".vat");
+    if (std::filesystem::exists(packed_path)) {
+        auto topologies = VATLoader::load_all(packed_path);
+        if (topologies.empty()) {
+            CI_LOG_E("VATMesh: Failed to load packed VAT " << packed_path.string());
+            return false;
+        }
+
+        _sequences.resize(topologies.size());
+        uint32_t frame_offset = 0;
+        for (uint32_t i = 0; i < topologies.size(); ++i) {
+            fill_sequence(_sequences[i], std::move(topologies[i]), frame_offset);
+            frame_offset += _sequences[i].frame_count;
+        }
+
+        CI_LOG_I("VATMesh: Loaded " << topologies.size() << " topologies (packed), "
+                 << frame_offset << " total frames from " << packed_path.string());
+        return true;
+    }
 
     // Count numbered .vat files: base_name + "0.vat", "1.vat", ...
     uint32_t count = 0;
@@ -54,17 +97,8 @@ bool VATMesh::load_folder(const std::filesystem::path& folder_path,
             return false;
         }
 
-        // Move VATData into VATSequence
-        auto& seq = _sequences[i];
-        seq.vertex_count = vat_data.vertex_count;
-        seq.frame_count = vat_data.frame_count;
-        seq.index_count = vat_data.index_count;
-        seq.indices = std::move(vat_data.indices);
-        seq.texcoords = std::move(vat_data.texcoords);
-        seq.positions = std::move(vat_data.positions);
-        seq.normals = std::move(vat_data.normals);
-        seq.frame_offset = frame_offset;
-        frame_offset += seq.frame_count;
+        fill_sequence(_sequences[i], std::move(vat_data), frame_offset);
+        frame_offset += _sequences[i].frame_count;
     }
 
     CI_LOG_I("VATMesh: Loaded " << count << " topologies, "
@@ -73,25 +107,23 @@ bool VATMesh::load_folder(const std::filesystem::path& folder_path,
 }
 
 bool VATMesh::load_vat(const std::filesystem::path& file_path) noexcept {
-    auto vat_data = VATLoader::load(file_path);
-    if (!vat_data.is_valid())
+    // V1 packed files append every topology; V0 files append a single one
+    auto topologies = VATLoader::load_all(file_path);
+    if (topologies.empty())
         return false;
 
     _name = file_path.filename().stem().string();
 
-    VATSequence seq;
-    seq.vertex_count = vat_data.vertex_count;
-    seq.frame_count = vat_data.frame_count;
-    seq.index_count = vat_data.index_count;
-    seq.indices = std::move(vat_data.indices);
-    seq.texcoords = std::move(vat_data.texcoords);
-    seq.positions = std::move(vat_data.positions);
-    seq.normals = std::move(vat_data.normals);
-    seq.frame_offset = 0;
-    for (auto& s : _sequences)
-        seq.frame_offset += s.frame_count;
+    uint32_t frame_offset = 0;
+    for (auto& seq : _sequences)
+        frame_offset += seq.frame_count;
 
-    _sequences.push_back(std::move(seq));
+    for (auto& vat_data : topologies) {
+        VATSequence seq;
+        fill_sequence(seq, std::move(vat_data), frame_offset);
+        frame_offset += seq.frame_count;
+        _sequences.push_back(std::move(seq));
+    }
     return true;
 }
 
@@ -175,11 +207,12 @@ void VATMesh::_compute_tangents(VATSequence& seq) noexcept {
 
 void VATMesh::_ensure_shader_registered(Device& device) noexcept {
     auto& sm = newtype::core::ShaderManager::instance();
+    gInterpolateShader.assign(kShaderName);
     if (sm.hasShader(kShaderName))
         return;
 
     sm.registerShader<1>(kShaderName, [&](
-        compute::BufferVar<util::Vertex> out_vertices,
+        compute::BufferVar<util::ActiveVertex> out_vertices,
         compute::BufferVar<luisa::float3> pos_frames,
         compute::BufferVar<luisa::float3> norm_frames,
         compute::UInt vertex_count,
@@ -230,11 +263,13 @@ void VATMesh::_ensure_shader_registered(Device& device) noexcept {
             Float3 pos  = lerp(pos_a, pos_b, t);
             Float3 norm = safe_normalize(lerp(norm_a, norm_b, t));
           
-            // Write to vertex buffer (preserve tangent + UV by reading existing)
-            Var<Vertex> v = out_vertices.read(i);
+            // Write to vertex buffer (preserve tangent + UV by reading existing).
+            // A2: layout-generic setters re-encode normal/tangent when the
+            // active GPU layout packs them (positions are fp32 everywhere).
+            using GpuVert = util::ActiveVertex;
+            Var<GpuVert> v = out_vertices.read(i);
             v.px = pos.x; v.py = pos.y; v.pz = pos.z;
-            v.nx = norm.x; v.ny = norm.y; v.nz = norm.z;
-            //v.nx = 1.f; v.ny = 0.f; v.nz = 0.f;
+            util::vertex_set_normal(v, norm);
 
             $if(update_tangent) {
                 // Recompute tangent from interpolated normal
@@ -244,18 +279,17 @@ void VATMesh::_ensure_shader_registered(Device& device) noexcept {
                     luisa::compute::make_float3(1.f, 0.f, 0.f)
                 );
                 Float3 tangent = safe_normalize(cross(up, norm));
-                v.tx = tangent.x; v.ty = tangent.y; v.tz = tangent.z;
-                v.tw = 1.0f;
+                util::vertex_set_tangent(v, tangent, 1.0f);
             } 
             $else{
-                v.tx = 1.f; v.ty = 0.f; v.tz = 0.f; v.tw = 1.0f;
+                util::vertex_set_tangent(v, luisa::compute::make_float3(1.f, 0.f, 0.f), 1.0f);
             };
 
             out_vertices.write(i, v);
         };
     });
 
-    CI_LOG_I("VATMesh: Registered interpolation shader '" << kShaderName << "'");
+    CI_LOG_D("VATMesh: Registered interpolation shader '" << kShaderName << "'");
 }
 
 //==============================================================================
@@ -311,7 +345,7 @@ void VATMesh::build(newtype::core::Pipeline& pipeline, Stream& stream, uint mate
         auto id = pipeline.addShape(std::move(mesh), &_transform);
         _shape_ids.push_back(id);
 
-        CI_LOG_I("VATMesh: Built topology " << i
+        CI_LOG_D("VATMesh: Built topology " << i
                  << " (verts:" << seq.vertex_count
                  << " tris:"   << tri_count
                  << " frames:" << seq.frame_count << ")");
@@ -424,10 +458,8 @@ void VATMesh::update(newtype::core::Pipeline& pipeline, float dt) noexcept {
     auto& seq = _sequences[_active];
     auto& sm = newtype::core::ShaderManager::instance();
 
-    pipeline.computeStream() << sm.shader<1,
-        Buffer<Vertex>, Buffer<luisa::float3>, Buffer<luisa::float3>,
-        uint, uint, float, bool>(
-        kShaderName,
+    pipeline.computeStream() << sm.shader(
+        gInterpolateShader,
         deformable->next_vertex_buffer(),
         seq.positions_gpu,
         seq.normals_gpu,

@@ -27,6 +27,26 @@ using {{ export_macro }}_RegisterFn = std::uint32_t(*)(const char* name, std::an
 /// Function pointer: clear all custom callables.
 using {{ export_macro }}_ClearFn = void(*)();
 
+// --- ABI v2: runtime tuning params (docs/custom_material_callables.md,
+//     docs/resolver_params_abi_plan.md) --------------------------------------
+
+/// One named scalar tuning param. min/max/default drive the engine's UI slider.
+struct {{ export_macro }}_ParamDesc {
+    const char* name;
+    float       min_v;
+    float       max_v;
+    float       def_v;
+};
+
+/// Function pointer: register a callable's params, returns the callable's
+/// float4 base in the engine's params buffer (read shader-side via
+/// resolver_params(tex, base, i) — see {{ namespace }}/render/Shading.h).
+/// Returns ~0u on overflow.
+using {{ export_macro }}_ParamRegisterFn = std::uint32_t(*)(
+    const char* callable,
+    const {{ export_macro }}_ParamDesc* descs,
+    std::uint32_t count);
+
 extern "C" {
 
 /**
@@ -37,6 +57,19 @@ extern "C" {
  */
 {{ export_macro }}_API void registerMaterialCallables(
     {{ export_macro }}_RegisterFn registerFn, {{ export_macro }}_ClearFn clearFn);
+
+/**
+ * @brief ABI v2: registration with runtime tuning params.
+ *
+ * Same callable semantics as v1, plus per-callable param descriptors.
+ * paramFn may be null (host without params support) — skip param
+ * registration then. The loader prefers this export and falls back to
+ * registerMaterialCallables when absent.
+ */
+{{ export_macro }}_API void registerMaterialCallables2(
+    {{ export_macro }}_RegisterFn registerFn,
+    {{ export_macro }}_ParamRegisterFn paramFn,
+    {{ export_macro }}_ClearFn clearFn);
 
 /**
  * @brief Clear custom callables (called before DLL unload).

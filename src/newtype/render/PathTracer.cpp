@@ -80,7 +80,7 @@ MoveOnlyAny PathTracer::compile(Device& device) {
         ImageFloat output,
         ImageUInt seed_image,
         AccelVar accel,
-        BufferVar<util::Vertex> vertices,
+        BufferVar<util::ActiveVertex> vertices,
         BufferVar<uint> material_indices,
         BufferVar<MaterialData> materials,
         Float light_select_pmf,                 // Unused in Step 1
@@ -102,14 +102,14 @@ MoveOnlyAny PathTracer::compile(Device& device) {
 
         UInt seed = seed_image.read(coord).x;
 
-        // Generate camera ray with jittered sampling
+        // Generate camera ray with jittered sampling.
+        // Raw NDC in [-1,1] — generate_ray applies the aspect itself (the old
+        // pre-scale here double-applied it and squeezed the image).
         Float2 uv = (make_float2(coord) + make_float2(lcg(seed), lcg(seed))) / resolution;
         Float2 ndc = uv * 2.0f - 1.0f;
-        Float aspect = resolution.x / resolution.y;
-        Float2 pixel_ndc = ndc * make_float2(aspect, 1.0f);
 
         // Generate ray from camera
-        Var<Ray> ray = camera->generate_ray(pixel_ndc);
+        Var<Ray> ray = camera->generate_ray(ndc);
 
         // Path tracing loop
         Float3 radiance = def(make_float3(0.0f));
@@ -124,9 +124,9 @@ MoveOnlyAny PathTracer::compile(Device& device) {
             };
 
             // Get hit information
-            Var<util::Vertex> v0 = vertices.read(hit.prim * 3u + 0u);
-            Var<util::Vertex> v1 = vertices.read(hit.prim * 3u + 1u);
-            Var<util::Vertex> v2 = vertices.read(hit.prim * 3u + 2u);
+            Var<util::ActiveVertex> v0 = vertices.read(hit.prim * 3u + 0u);
+            Var<util::ActiveVertex> v1 = vertices.read(hit.prim * 3u + 1u);
+            Var<util::ActiveVertex> v2 = vertices.read(hit.prim * 3u + 2u);
 
             // Interpolate vertex attributes
             Float3 p = hit->triangle_interpolate(v0->position(), v1->position(), v2->position());
@@ -159,9 +159,9 @@ MoveOnlyAny PathTracer::compile(Device& device) {
                 Float3 bary = sample_uniform_triangle(u_tri);
 
                 // Get vertex positions for the light triangle
-                Var<util::Vertex> lv0 = vertices.read(tri->v0);
-                Var<util::Vertex> lv1 = vertices.read(tri->v1);
-                Var<util::Vertex> lv2 = vertices.read(tri->v2);
+                Var<util::ActiveVertex> lv0 = vertices.read(tri->v0);
+                Var<util::ActiveVertex> lv1 = vertices.read(tri->v1);
+                Var<util::ActiveVertex> lv2 = vertices.read(tri->v2);
 
                 // Compute light sample point
                 Float3 light_p = bary.x * lv0->position() + bary.y * lv1->position() + bary.z * lv2->position();

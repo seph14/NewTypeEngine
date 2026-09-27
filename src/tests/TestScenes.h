@@ -9,6 +9,10 @@
 //   NewTypeEngine.exe --scene material   material sphere grid (default)
 //   NewTypeEngine.exe --scene cornell    Cornell box with animated occluder
 //   NewTypeEngine.exe --scene room       full room interior (glass/metal/fabric)
+//   NewTypeEngine.exe --scene xform      transform-tree hierarchy rig
+//   NewTypeEngine.exe --scene alias      LightSampler alias-table self-check
+//   NewTypeEngine.exe --scene vat        VATMesh playback (packed V1 northwall)
+//   NewTypeEngine.exe --scene tetcage     tetrahedral-cage wind spike (ginkgo)
 //
 // To add a scene: subclass TestScene, implement build() (+ optional
 // update()/drawUi()), register it in createScene() below, and add the .cpp
@@ -21,6 +25,8 @@
 #include <unordered_map>
 
 #include "newtype/NewType.h"  // nt alias for newtype + core engine headers
+
+namespace newtype::util { class Camera; }
 
 // NOTE: defined as newtype::test (not "namespace nt::test") — nt is a
 // namespace *alias* (NewType.h) and can't be reopened directly.
@@ -38,10 +44,19 @@ public:
 
     /// Per-frame hook — runs inside the app's tick, before Pipeline::update().
     /// AnimatedTransform members mutated here are polled by the pipeline.
-    virtual void update(float time, float dt) { (void)time; (void)dt; }
+    virtual void update(float time, float dt, core::Pipeline& pipeline) 
+    {
+        (void)time; (void)dt; (void)pipeline;
+    }
 
     /// ImGui hook — runs inside the "Engine" window.
     virtual void drawUi() {}
+
+    /// Optional camera hook — runs in app setup() after assets/scene.json is
+    /// loaded. Scenes with an authored viewpoint (e.g. the FBX import camera)
+    /// apply it here, overriding a camera saved for a previous scene;
+    /// scenes without one keep the loaded/last-used camera.
+    virtual void applyCamera(newtype::util::Camera& camera) { (void)camera; }
 
     /// Publish a material index for the optional experimental blocks in
     /// NewTypeEngine.cpp (NT_ALLOW_RASTER_FEATURES / NT_ENABLE_PROCEDURAL),
@@ -67,9 +82,9 @@ private:
 using ScenePtr = std::unique_ptr<TestScene>;
 
 /// Default scene when no --scene argument is given.
-inline constexpr const char* kDefaultScene = "logo";
+inline constexpr const char* kDefaultScene = "material";
 
-/// Factory for the built-in sample scenes: "cornell" | "material" | "room" | "logo".
+/// Factory for the built-in sample scenes: "cornell" | "material" | "room" | "xform" | "alias" | "hit" | "fbx" | "vat" | "tetcage".
 /// Returns nullptr for unknown names.
 ScenePtr createScene(const std::string& name);
 

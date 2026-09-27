@@ -36,19 +36,53 @@ using namespace luisa::compute;
 using namespace {{ namespace }}::render;
 
 //==============================================================================
-// Callable 1: {{ callables[0].name }} — {{ callables[0].description }}
+// Runtime tuning params (ABI v2 — docs/custom_material_callables.md)
+//
+// Value-only edits need NO DLL rebuild and NO shader recompile: the engine
+// hosts a params buffer at a reserved bindless slot inside the SAME `tex`
+// array the resolver receives. Register descriptors (name/min/max/default)
+// via paramFn at load; it returns the callable's float4 base. Capture the
+// base by value and read values with resolver_params(tex, base, i).
+// Scalars pack 4 per float4 in registration order (descriptor j lives at
+// float4[j/4], component j%4). Values are editable live in the MaterialPool
+// "Resolver Params" UI. A ~0u base (paramFn absent / overflow) means "no
+// params" — keep a hard-coded fallback branch for that case.
 //==============================================================================
-static SurfaceResolveFn {{ callables[0].name }}_resolver =
-    [](SurfaceData s, Var<MaterialData> mat,
-       Float2 screen_uv, Float3 wo, Float time,
-       const BindlessVar& tex, UInt w, UInt h) -> SurfaceData {
+static constexpr std::uint32_t kNoParamBase = ~0u;
 
-    // TODO: Implement {{ callables[0].name }} logic here
-    // Example: modify s.albedo, s.roughness, s.emission, etc.
-    // Read UV via s.uv.
-
-    return s;
+//==============================================================================
+// Callable 1: {{ callables[0].name }} — {{ callables[0].description }}
+// (demonstrates the runtime-params pattern: factory takes the float4 base)
+//==============================================================================
+static const {{ export_macro }}_ParamDesc k{{ callables[0].name | capitalize }}Params[] = {
+    // name, min, max, default — one scalar per row, up to 32 per callable.
+    // TODO: rename/extend for your effect.
+    {"intensity", 0.0f, 2.0f, 1.0f},
+    {"scale",     0.1f, 10.0f, 1.0f},
 };
+
+static SurfaceResolveFn make_{{ callables[0].name }}_resolver(std::uint32_t base) {
+    return [base](SurfaceData s, Var<MaterialData> mat,
+                  Float2 screen_uv, Float3 wo, Float time,
+                  const BindlessVar& tex, UInt w, UInt h) -> SurfaceData {
+
+        Float intensity = 1.0f;   // hard-coded fallback (no-params hosts)
+        Float scale     = 1.0f;
+        if (base != kNoParamBase) {
+            Float4 p0 = resolver_params(tex, base, 0u);
+            // Scalars pack 4 per float4: intensity = param 0 -> p0.x,
+            // scale = param 1 -> p0.y.
+            intensity = p0.x;
+            scale     = p0.y;
+        }
+
+        // TODO: Implement {{ callables[0].name }} logic here using
+        // intensity/scale — e.g. modulate s.albedo by intensity.
+        // Read UV via s.uv.
+
+        return s;
+    };
+}
 
 {% for callable in callables[1:] %}
 //==============================================================================
@@ -71,13 +105,43 @@ static SurfaceResolveFn {{ callable.name }}_resolver =
 
 extern "C" {
 
+// ABI v1 — callables only (the loader falls back here when v2 is absent).
 {{ export_macro }}_API void registerMaterialCallables(
     {{ export_macro }}_RegisterFn registerFn, {{ export_macro }}_ClearFn clearFn) {
 {% for callable in callables %}
+{% if loop.first %}
+    registerFn("{{ callable.name }}", make_{{ callable.name }}_resolver(kNoParamBase));
+{% else %}
     registerFn("{{ callable.name }}", {{ callable.name }}_resolver);
+{% endif %}
 {% endfor %}
 
     printf("[{{ shader_name }}] Registered {{ callables | length }} custom callables\n");
+}
+
+// ABI v2 — callables + runtime tuning params (docs/custom_material_callables.md).
+// Call paramFn FIRST for params-using callables: its return value (the
+// float4 base) is captured by the resolver factory. Callables may opt out —
+// plain registerFn without a paramFn call keeps them hard-coded.
+{{ export_macro }}_API void registerMaterialCallables2(
+    {{ export_macro }}_RegisterFn registerFn,
+    {{ export_macro }}_ParamRegisterFn paramFn,
+    {{ export_macro }}_ClearFn clearFn) {
+{% for callable in callables %}
+{% if loop.first %}
+    std::uint32_t {{ callable.name }}_base = kNoParamBase;
+    if (paramFn) {
+        {{ callable.name }}_base = paramFn(
+            "{{ callable.name }}", k{{ callable.name | capitalize }}Params, 2u);
+    }
+    registerFn("{{ callable.name }}", make_{{ callable.name }}_resolver({{ callable.name }}_base));
+{% else %}
+    registerFn("{{ callable.name }}", {{ callable.name }}_resolver);
+{% endif %}
+{% endfor %}
+
+    printf("[{{ shader_name }}] Registered {{ callables | length }} custom callables (v2, params%s)\n",
+           paramFn ? "" : " unavailable");
 }
 
 {{ export_macro }}_API void unregisterMaterialCallables({{ export_macro }}_ClearFn clearFn) {

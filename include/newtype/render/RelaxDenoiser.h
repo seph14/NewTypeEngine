@@ -5,6 +5,21 @@ namespace newtype {
 namespace render {
 
 //==============================================================================
+// ReLAX debug-viz build epoch. Bumped whenever the debug-viz encoding or the
+// denoiser fixes it tags change. Painted as corner markers by the viz blits
+// (gray = epoch * 0.25, both left corners — texture row 0 is screen BOTTOM,
+// see the uv-convention note in PassDenoiserHitAndTemporal.cpp) AND appended
+// to the window title at scene load — if the title does not carry this tag,
+// the running exe predates the source.
+// Epoch 6: original engine signs restored (-up recon, -0.5 projection formula);
+// only the discriminator G, markers, and persistence differ from the original math. — TA reconstructions back to +up·clipY and
+// all TA matrix projections to clip.xy*(0.5,+0.5)+0.5 (was NRD's -0.5 form,
+// which vertically mirrors the fetch position in this engine's y-up uv).
+//==============================================================================
+inline constexpr int kRelaxVizEpoch = 64;
+inline constexpr char kRelaxVizEpochTag[] = " [ReLAX viz e64]";
+
+//==============================================================================
 // RelaxConstants — GPU-side constants uploaded each frame (LUISA_STRUCT)
 //==============================================================================
 // Ported from NRD v4.17 RELAX_SHARED_CONSTANTS (RELAX_Config.hlsli).
@@ -36,7 +51,9 @@ struct RelaxConstants {
     luisa::float4 gPrevFrustumForward;
 
     // --- Camera motion ---
-    luisa::float4 gCameraDelta;            // world-space camera translation
+    luisa::float4 gCameraDelta;            // world-space camera translation (C_cur − C_prev)
+    luisa::float4 gCamPosCur;              // current camera position (world): bridges the
+                                           // camera-relative reconstruction to the world matrices
     luisa::float4 gMvScale;                // motion vector scale (xyz), unused(w)
 
     // --- Jitter ---
@@ -193,7 +210,7 @@ LUISA_STRUCT(newtype::render::RelaxConstants,
     gRotatorPre,
     gFrustumRight, gFrustumUp, gFrustumForward,
     gPrevFrustumRight, gPrevFrustumUp, gPrevFrustumForward,
-    gCameraDelta, gMvScale,
+    gCameraDelta, gCamPosCur, gMvScale,
     gJitterX, gJitterY,
     gResolutionScaleX, gResolutionScaleY, gRectOffsetX, gRectOffsetY,
     gResourceSizeInvX, gResourceSizeInvY, gResourceSizeX, gResourceSizeY,
@@ -232,6 +249,7 @@ LUISA_STRUCT(newtype::render::RelaxConstants,
     gDisableAntilag, gDisableClamp,
     gIsLastPass, gDebugViz
 ) {};
+
 
 namespace newtype {
 namespace render {
@@ -283,7 +301,10 @@ struct RelaxSettings {
     float specularPrepassBlurRadius         = 50.0f;
 
     // Spatial variance estimation
-    uint32_t spatialVarianceEstimationHistoryThreshold = 1;  // RTXDI FullSample override: SVE after 1 frame stabilizes young penumbra history
+    // NRD default is 3 (NRDSettings.h:392). A threshold of 1 disables SVE
+    // entirely — TA guarantees historyLength >= 1, so "hl < 1" never fires and
+    // young-history pixels never get spatial variance for Atrous.
+    uint32_t spatialVarianceEstimationHistoryThreshold = 3;
 
     // Atrous
     uint32_t atrousIterationNum             = 5;
@@ -291,8 +312,10 @@ struct RelaxSettings {
     // Anti-firefly (RCRS). NRD RELAX default is OFF (NRDSettings.h:448); the
     // NRD-Sample also runs with it off. Was ON since 2026-06 to stop blocky
     // clusters on high-spec metal (isolated env fireflies blowing up Atrous
-    // variance) — if those clusters return, re-enable this first.
-    bool  enableAntiFirefly                 = true;   // RTXDI FullSample ships RCRS on for ReSTIR + HDR input
+    // variance) — RC6 restored the NRD default because RCRS shaves converged
+    // highlight peaks and fragments thin light-strip reflections into dashes.
+    // If those clusters return, re-enable this first.
+    bool  enableAntiFirefly                 = false;
 
     // Anti-lag
     float antilagAccelerationAmount         = 0.3f;

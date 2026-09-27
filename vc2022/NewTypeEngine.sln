@@ -4,9 +4,13 @@ VisualStudioVersion = 17.14.36717.8
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NewTypeEngine", "NewTypeEngine.vcxproj", "{A8B3C4D5-E6F7-4A8B-9C0D-1E2F3A4B5C6D}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TestShader", "..\runtime_shaders\TestShader\TestShader.vcxproj", "{33B35E84-E8B9-0B44-6481-1368776EF0AB}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleTestShader", "..\runtime_shaders\SimpleTestShader\SimpleTestShader.vcxproj", "{898E0205-2AC1-4486-9A16-2D2C70696FD2}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CustomMaterialShader", "..\runtime_shaders\CustomMaterialShader\CustomMaterialShader.vcxproj", "{C1D2E3F4-A5B6-7C8D-9E0F-1A2B3C4D5E6F}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NewTypeEngineLib", "NewTypeEngineLib\NewTypeEngineLib.vcxproj", "{7E9F1A2B-3C4D-4E5F-8A90-B1C2D3E4F5A6}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +25,12 @@ Global
 		{A8B3C4D5-E6F7-4A8B-9C0D-1E2F3A4B5C6D}.Debug|x64.Build.0 = Debug|x64
 		{A8B3C4D5-E6F7-4A8B-9C0D-1E2F3A4B5C6D}.Release|x64.ActiveCfg = Release|x64
 		{A8B3C4D5-E6F7-4A8B-9C0D-1E2F3A4B5C6D}.Release|x64.Build.0 = Release|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Debug_Runtime|x64.ActiveCfg = Debug_Runtime|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Debug_Runtime|x64.Build.0 = Debug_Runtime|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Debug|x64.ActiveCfg = Debug|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Debug|x64.Build.0 = Debug|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Release|x64.ActiveCfg = Release|x64
+		{33B35E84-E8B9-0B44-6481-1368776EF0AB}.Release|x64.Build.0 = Release|x64
 		{898E0205-2AC1-4486-9A16-2D2C70696FD2}.Debug_Runtime|x64.ActiveCfg = Debug_Runtime|x64
 		{898E0205-2AC1-4486-9A16-2D2C70696FD2}.Debug_Runtime|x64.Build.0 = Debug_Runtime|x64
 		{898E0205-2AC1-4486-9A16-2D2C70696FD2}.Debug|x64.ActiveCfg = Debug|x64
@@ -33,6 +43,9 @@ Global
 		{C1D2E3F4-A5B6-7C8D-9E0F-1A2B3C4D5E6F}.Debug|x64.Build.0 = Debug|x64
 		{C1D2E3F4-A5B6-7C8D-9E0F-1A2B3C4D5E6F}.Release|x64.ActiveCfg = Release|x64
 		{C1D2E3F4-A5B6-7C8D-9E0F-1A2B3C4D5E6F}.Release|x64.Build.0 = Release|x64
+		{7E9F1A2B-3C4D-4E5F-8A90-B1C2D3E4F5A6}.Debug_Runtime|x64.ActiveCfg = Debug|x64
+		{7E9F1A2B-3C4D-4E5F-8A90-B1C2D3E4F5A6}.Debug|x64.ActiveCfg = Debug|x64
+		{7E9F1A2B-3C4D-4E5F-8A90-B1C2D3E4F5A6}.Release|x64.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

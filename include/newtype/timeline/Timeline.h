@@ -41,6 +41,9 @@ public:
     void drawTimeline(float time, float winHeight = 320.f, float maxWidth = 900.f);
     void drawEditor();
 
+    // Whether drawEditor() should push path gizmos this frame (UI toggle).
+    [[nodiscard]] bool showGizmos() const noexcept { return _showGizmos; }
+
     float duration() const { return _duration; }
 
 private:
@@ -51,6 +54,7 @@ private:
     bool _looping = true;
     bool _updateEnabled = true;
     bool _showTimeline = false;
+    bool _showGizmos = true;
     int _selectedEventIdx = -1;
     bool _scrollToSelected = false;
 

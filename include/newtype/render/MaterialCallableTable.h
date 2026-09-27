@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <unordered_map>
 
+#include "newtype/render/Material.h"
+
 namespace newtype::render {
 
 /// Unsigned int shorthand (consistent with LuisaCompute DSL types)
@@ -28,12 +30,13 @@ using uint = std::uint32_t;
  * (where Var<MaterialData> is valid). Outside that context,
  * the callable is stored as std::any and cast at dispatch time.
  *
- * Built-in types (0-12): resolve is empty std::any (identity transform).
- * Custom types (13-32): resolve holds the user-defined callable.
+ * Built-in types (below kFirstCustomTypeId): resolve is empty std::any
+ * (identity transform). Custom types (kFirstCustomTypeId..kMaxTypes-1):
+ * resolve holds the user-defined callable.
  */
 struct MaterialCallableEntry {
     std::string        name;       ///< Debug name
-    uint               type_id;    ///< MaterialType ID (0-12 built-in, 13-32 custom)
+    uint               type_id;    ///< MaterialType ID (built-in, or custom >= kFirstCustomTypeId)
     std::any           resolve;    ///< Type-erased callable body (empty = identity)
 };
 
@@ -44,14 +47,18 @@ struct MaterialCallableEntry {
  * At kernel compile time, entries() is iterated with a C++ for-loop
  * to generate $switch/$case dispatch in resolve_surface().
  *
- * Built-in types (0-12) are registered at startup with identity transforms
+ * Built-in types are registered at startup with identity transforms
  * (empty std::any — dispatch skips them).
- * Custom types (13-32) are registered by the user before buildScene().
+ * Custom types (kFirstCustomTypeId..kMaxTypes-1) are registered by the user
+ * before buildScene().
  */
 class MaterialCallableTable {
 public:
     static constexpr uint kMaxTypes = 32u;
-    static constexpr uint kFirstCustomTypeId = 14u;
+    /// Single source of truth: kFirstCustomMaterialType in Material.h, derived
+    /// from the last built-in MaterialType. Adding a built-in type shifts the
+    /// custom range automatically.
+    static constexpr uint kFirstCustomTypeId = kFirstCustomMaterialType;
 
     /// Register a custom callable (type-erased). Returns assigned type ID, or ~0u on failure.
     /// The std::any MUST contain a SurfaceResolveFn (std::function<SurfaceData(...)>).

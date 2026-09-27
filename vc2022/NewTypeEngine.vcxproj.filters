@@ -94,6 +94,12 @@
     <Filter Include="Source Files\newtype\media">
       <UniqueIdentifier>{e5f6a7b8-c9d0-4122-9c3f-4a5b6c7d8e9f}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\newtype\audio">
+      <UniqueIdentifier>{fbaad6a8-8d14-4c5f-9b6d-018b69c35712}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\audio">
+      <UniqueIdentifier>{57cba04c-740d-42df-b611-9b64804c5adc}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\NewTypeEngine.cpp">
@@ -103,6 +109,12 @@
       <Filter>Source Files\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\tests\CornellBox.cpp">
+      <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\TransformTreeTest.cpp">
+      <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\AliasTableTest.cpp">
       <Filter>Source Files\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\tests\MaterialTest.cpp">
@@ -207,6 +219,9 @@
     <ClCompile Include="..\src\newtype\render\PassSSS.cpp">
       <Filter>Source Files\newtype\render</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\newtype\render\PassSharc.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
     <ClCompile Include="$(CinderRoot)\src\glad\glad.c">
       <Filter>Source Files\newtype\core</Filter>
     </ClCompile>
@@ -226,6 +241,12 @@
       <Filter>Source Files\newtype\media</Filter>
     </ClCompile>
     <ClCompile Include="..\src\newtype\media\VideoPlayer.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\media\VideoAudioStream.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\media\VideoAudioNode.cpp">
       <Filter>Source Files\newtype\media</Filter>
     </ClCompile>
     <ClCompile Include="..\src\newtype\scene\VATMesh.cpp">
@@ -282,10 +303,19 @@
     <ClCompile Include="..\src\newtype\feature\ChromaticAberrationFeature.cpp">
       <Filter>Source Files\newtype\feature</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\newtype\feature\FxaaFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\feature\Gizmo.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\newtype\feature\PointCloud.cpp">
       <Filter>Source Files\newtype\feature</Filter>
     </ClCompile>
     <ClCompile Include="..\src\newtype\scene\ProceduralGeometry.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\scene\TetCageGeometry.cpp">
       <Filter>Source Files\newtype\scene</Filter>
     </ClCompile>
     <ClCompile Include="..\src\newtype\timeline\EasingCurve.cpp">
@@ -318,8 +348,44 @@
     <ClCompile Include="..\src\newtype\physics\Physics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\tests\LogoScene.cpp">
+    <ClCompile Include="..\src\tests\HitBug.cpp">
       <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\upscal\Fsr31Backend.cpp">
+      <Filter>Source Files\newtype\plugin</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\upscal\DlssSrBackend.cpp">
+      <Filter>Source Files\newtype\plugin</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\ngx\NgxContext.cpp">
+      <Filter>Source Files\newtype\plugin</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\ngx\DlssRayReconstruction.cpp">
+      <Filter>Source Files\newtype\plugin</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\scene\ModelLoader.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\FbxScene.cpp">
+      <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\VatScene.cpp">
+      <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\TetCageScene.cpp">
+      <Filter>Source Files\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\core\DxPresent.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\audio\AmbisonicsNodes.cpp">
+      <Filter>Source Files\newtype\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\audio\SpatialAudio.cpp">
+      <Filter>Source Files\newtype\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\newtype\core\EngineVersion.cpp">
+      <Filter>Source Files\newtype\core</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -356,12 +422,7 @@
     <ClInclude Include="..\include\newtype\render\TextureConverter.h">
       <Filter>Header Files\newtype\render</Filter>
     </ClInclude>
-    <!--<ClInclude Include="..\runtime_shaders\PathTracerShader\PathTracerShader.h">
-      <Filter>Header Files\shaders</Filter>
-    </ClInclude>
-    <ClInclude Include="..\runtime_shaders\PathTracerShader\PathTracerShaderAPI.h">
-      <Filter>Header Files\shaders</Filter>
-    </ClInclude>-->
+-->
     <ClInclude Include="..\include\newtype\render\BSDF.h">
       <Filter>Header Files\newtype\render</Filter>
     </ClInclude>
@@ -461,6 +522,12 @@
     <ClInclude Include="..\include\newtype\render\PassSSS.h">
       <Filter>Header Files\newtype\render</Filter>
     </ClInclude>
+    <ClInclude Include="..\include\newtype\render\PassSharc.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\render\Sharc.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
     <ClInclude Include="..\include\newtype\render\RelaxDenoiser.h">
       <Filter>Header Files\newtype\render</Filter>
     </ClInclude>
@@ -486,6 +553,15 @@
       <Filter>Header Files\newtype\media</Filter>
     </ClInclude>
     <ClInclude Include="..\include\newtype\media\VideoPlayer.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\media\VideoAudioStream.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\media\VideoAudioNode.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\media\AudioRingBuffer.h">
       <Filter>Header Files\newtype\media</Filter>
     </ClInclude>
     <ClInclude Include="..\include\newtype\scene\VATMesh.h">
@@ -536,10 +612,19 @@
     <ClInclude Include="..\include\newtype\feature\ChromaticAberrationFeature.h">
       <Filter>Header Files\newtype\feature</Filter>
     </ClInclude>
+    <ClInclude Include="..\include\newtype\feature\FxaaFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\feature\Gizmo.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
     <ClInclude Include="..\include\newtype\feature\PointCloud.h">
       <Filter>Header Files\newtype\feature</Filter>
     </ClInclude>
     <ClInclude Include="..\include\newtype\scene\ProceduralGeometry.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\scene\TetCageGeometry.h">
       <Filter>Header Files\newtype\scene</Filter>
     </ClInclude>
     <ClInclude Include="..\include\newtype\render\ProceduralTrace.h">
@@ -598,6 +683,18 @@
     </ClInclude>
     <ClInclude Include="..\include\newtype\render\MetalData.h">
       <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\scene\ModelLoader.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\core\DxPresent.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\audio\AmbisonicsNodes.h">
+      <Filter>Header Files\newtype\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\newtype\audio\SpatialAudio.h">
+      <Filter>Header Files\newtype\audio</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

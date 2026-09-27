@@ -1,0 +1,111 @@
+{
+    "cameras": [
+        {
+            "eye": [
+                7.481131553649902,
+                5.34366512298584,
+                6.5076398849487305
+            ],
+            "far": 99.99999237060547,
+            "fov": 28.8415470123291,
+            "name": "Camera",
+            "near": 0.09999999403953552,
+            "orient": [
+                -0.20997299253940582,
+                0.38577985763549805,
+                0.090628482401371,
+                0.8937962055206299
+            ]
+        }
+    ],
+    "format": "newtype.model",
+    "geometries": [
+        {
+            "file": "mesh/blender_279_default_7400_binary_Material.msh",
+            "format": "trimesh",
+            "material": "Material",
+            "name": "blender_279_default_7400_binary_Material",
+            "triangles": 12,
+            "vertices": 24
+        }
+    ],
+    "lights": [
+        {
+            "color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "direction": [
+                -0.5663930773735046,
+                -0.7946724891662598,
+                0.2183912694454193
+            ],
+            "intensity": 1.0,
+            "name": "Lamp",
+            "position": [
+                4.076245307922363,
+                5.903861999511719,
+                -1.0054539442062378
+            ],
+            "type": "point"
+        }
+    ],
+    "materials": [
+        {
+            "data": {
+                "albedo": [
+                    0.64000004529953,
+                    0.64000004529953,
+                    0.64000004529953,
+                    1.0
+                ],
+                "alphacut": 0.0,
+                "anisotropic": 0.0,
+                "anisotropic_rot": 0.0,
+                "attenuation": [
+                    1.0,
+                    1.0,
+                    1.0
+                ],
+                "attenuation_distance": 1.0,
+                "bsdf_type_override": 0.0,
+                "clearcoat": 0.0,
+                "clearcoat_gloss": 0.5,
+                "diffuse_trans": 0.0,
+                "dispersion": 0.0,
+                "emission": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "fabric": 0.0,
+                "flatness": 0.0,
+                "ior": 1.5,
+                "iridescence": 0.0,
+                "iridescence_ior": 1.2999999523162842,
+                "iridescence_thickness": 0.0,
+                "iridescence_thickness_max": -1.0,
+                "k": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "meta": 0.0,
+                "metallic": 0.0,
+                "roughness": 0.41508710384368896,
+                "sheen": 0.0,
+                "sheen_tint": 0.0,
+                "specular_tint": 0.0,
+                "specular_trans": 0.0,
+                "type": 4
+            },
+            "name": "Material"
+        }
+    ],
+    "source": {
+        "file": "blender_279_default_7400_binary.fbx",
+        "normalized": true
+    },
+    "version": 1
+}

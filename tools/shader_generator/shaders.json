@@ -1,12 +1,6 @@
 {
   "shaders": [
     {
-      "name": "PathTracer",
-      "class_name": "PathTracerShader",
-      "export_macro": "PATH_TRACER",
-      "directory": "runtime_shaders/PathTracerShader"
-    },
-    {
       "name": "Demo",
       "class_name": "DemoShader",
       "export_macro": "DEMO",

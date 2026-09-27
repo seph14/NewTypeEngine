@@ -2,6 +2,7 @@
 
 #include <luisa/luisa-compute.h>
 #include <chrono>
+#include <cstdio>
 #include <mutex>
 #include <unordered_map>
 #include <string>
@@ -55,6 +56,18 @@ namespace newtype::util {
                 auto dt_ms = std::chrono::duration<double, std::milli>(t1 - it->second.start).count();
                 CI_LOG_I("[lcprof] " << cat_name(it->second.category)
                     << " " << dt_ms << " ms  " << key);
+                // Cold-compile timings also append to build/lcprof_log.txt:
+                // cinder's console sink is lost in windowed Release runs and
+                // the DBWIN single-buffer listener drops the async-thread
+                // burst during JIT (cold run 2026-09-26 captured only the 16
+                // bootstrap D3D12 lines, zero lcprof). One line per
+                // cache-miss compile; silent on warm runs.
+                if (FILE *f = fopen("build/lcprof_log.txt", "a"); f != nullptr) {
+                    fprintf(f, "%s %.3f %s\n",
+                            cat_name(it->second.category), dt_ms,
+                            key.empty() ? "(unnamed)" : key.c_str());
+                    fclose(f);
+                }
                 _pending.erase(it);
             }
         }

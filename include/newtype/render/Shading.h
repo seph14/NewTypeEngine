@@ -21,6 +21,13 @@ using namespace luisa::compute;
 /// Must match PROPERTY_DOUBLE_SIDED in newtype/scene/Shape.h.
 static constexpr uint kDoubleSidedFlag = 1u << 8u;
 
+/// Instance buffer property flag for camera-invisible geometry (e.g. a light
+/// shape that illuminates without rendering). Camera-path traces — G-buffer
+/// primary rays, shade mirror reflections, the glass tint replay — skip these
+/// instances; shadow / GI / light-sampling rays are unaffected.
+/// Must match PROPERTY_INVISIBLE_TO_CAMERA in newtype/scene/Shape.h.
+static constexpr uint kCameraInvisibleFlag = 1u << 9u;
+
 /// Returns the effective BSDF type from a MaterialData.
 /// For built-in types (0-12), returns material.type directly.
 /// For custom callables (type >= 13), returns bsdf_type_override if set (> 0).
@@ -36,6 +43,39 @@ static constexpr uint kDoubleSidedFlag = 1u << 8u;
     return result;
 }
 
+/// Interleaved gradient noise (Jiménez 2014), STATIC in frame count.
+/// Glass-blend rolls seed from this — a rotating/per-frame seed would flip the
+/// stored-surface identity every frame and reset ReLAX history to salt-and-
+/// pepper (same contract as the dispersion d-line fix, RC1). No frame term.
+[[nodiscard]] inline Float ign_static(UInt2 pixel) noexcept {
+    Float2 p = make_float2(cast<float>(pixel.x), cast<float>(pixel.y));
+    return fract(52.9829189f * fract(dot(p, make_float2(0.06711056f, 0.00583715f))));
+}
+
+/// Stored-surface consumer reclass for callable-driven glass blending
+/// (docs/glass_blend_plan.md). The G-Buffer PSR stochastically rolls blendable
+/// dielectrics per pixel: rolled-GLASS pixels trace through and store the
+/// background (glass bit set); rolled-OPAQUE pixels store the blendable
+/// surface itself — whose re-resolved bsdf_type is still 3/11 via
+/// bsdf_type_override. Every such consumer must reclass those pixels to a
+/// shadable opaque type (1) or they render black (delta BSDF, no NEE).
+/// Safe for legacy content: a stored 3/11 surface with a clear glass bit only
+/// exists for rolled-opaque blend pixels (real glass always accumulates
+/// fresnel > 0; the false-hit passthrough stores the non-glass background).
+inline void reclass_blend_rolled_opaque(SurfaceData &s, Expr<bool> gbuf_is_glass) noexcept {
+    Bool rolled = ((s.bsdf_type == 3u) | (s.bsdf_type == 11u)) & !gbuf_is_glass;
+    s.bsdf_type = ite(rolled, 1u, s.bsdf_type);
+    // Blendables author roughness 0 for the GLASS side; the opaque roll must
+    // not inherit it — the shade's delta-mirror branch (roughness <
+    // kMinRoughness on non-glass) would render the diffuse side as a black
+    // mirror. Floor only the rolled pixels (legacy surfaces never reclass).
+    s.roughness = ite(rolled, max(s.roughness, kMinRoughness), s.roughness);
+    // Same for dielectric specular_trans (1 on glass-authored materials): it
+    // routes the lobe list's energy into the transmission lobe, leaving the
+    // opaque roll zero diffuse — black. The glass side never reads it.
+    s.specular_trans = ite(rolled, 0.0f, s.specular_trans);
+}
+
 /// Callable signature for custom material surface resolution.
 /// Defined at namespace scope so DLL code can reference it.
 /// Only valid inside device.compile() contexts.
@@ -43,6 +83,31 @@ static constexpr uint kDoubleSidedFlag = 1u << 8u;
 using SurfaceResolveFn = std::function<SurfaceData(
     SurfaceData, Var<MaterialData>, Float2, Float3, Float,
     const BindlessVar&, UInt, UInt)>;
+
+/// Read a callable's runtime tuning params (docs/resolver_params_abi_plan.md).
+/// The params buffer occupies the reserved texture-bindless slot
+/// (MaterialPool::kResolverParamsBindlessSlot) the resolver already receives
+/// as `tex`; `base` is the callable's float4 base (host-assigned at
+/// registration — the ABI v2 paramFn's return value, captured by value in the
+/// resolver lambda). Values never enter the AST: editing them host-side is a
+/// buffer upload with no shader recompile. `i` indexes float4s within the
+/// callable's block (scalar j is component j%4 of i=j/4).
+[[nodiscard]] inline auto resolver_params(const BindlessVar& tex, UInt base, UInt i) noexcept {
+    return tex.buffer<luisa::float4>(MaterialPool::kResolverParamsBindlessSlot).read(base + i);
+}
+
+/// Read one float4 of an instance's per-instance custom data row (track B2,
+/// docs/vertex-packing-instancing-plan.md §4). Rows live at the reserved
+/// texture-bindless slot 1 and cover every TLAS instance once the app has
+/// authored any row (Pipeline::setInstanceUserData materializes them);
+/// before that the slot holds a small zero-filled placeholder — callables
+/// should read it only for scenes that author per-instance data. Mesh
+/// surfaces only: `s.instance_index` on a procedural surface is the
+/// procedural index, not a TLAS row. Zero cost unless a callable reads it.
+[[nodiscard]] inline auto instance_params(const BindlessVar& tex, UInt instance_index, UInt i) noexcept {
+    return tex.buffer<luisa::float4>(MaterialPool::kInstanceParamsBindlessSlot)
+        .read(instance_index * MaterialPool::kInstanceParamsPerInstance + i);
+}
 
 /// Register a custom material callable from any callable (lambda, function ptr, etc).
 /// Wraps into CustomSurfaceResolver<F> and registers with the Polymorphic container.
@@ -92,7 +157,7 @@ uint registerCustomCallable(SurfaceResolverPoly& poly, const std::string& name, 
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id, Float2 bary) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -112,7 +177,7 @@ uint registerCustomCallable(SurfaceResolverPoly& poly, const std::string& name, 
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -134,7 +199,7 @@ uint registerCustomCallable(SurfaceResolverPoly& poly, const std::string& name, 
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id, Float2 bary) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -152,7 +217,7 @@ uint registerCustomCallable(SurfaceResolverPoly& poly, const std::string& name, 
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id, Float2 bary) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -174,16 +239,16 @@ uint registerCustomCallable(SurfaceResolverPoly& poly, const std::string& name, 
 //==============================================================================
 struct MeshTriVerts {
     Var<luisa::compute::Triangle> tri;
-    Var<newtype::util::Vertex>    v0;
-    Var<newtype::util::Vertex>    v1;
-    Var<newtype::util::Vertex>    v2;
+    Var<newtype::util::ActiveVertex> v0;
+    Var<newtype::util::ActiveVertex> v1;
+    Var<newtype::util::ActiveVertex> v2;
 };
 
 [[nodiscard]] inline MeshTriVerts read_mesh_triangle(
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
     auto v1  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i1);
@@ -492,9 +557,9 @@ struct ProceduralTriData {
 // bsdf.evaluate*() — no rebuild from scalars. Use these whenever a SurfaceData
 // is available (so make_bsdf() can produce the layered/composed LobeList path).
 // Required for correct target_pdf under vertical layering: the scalar rebuild
-// below calls build_lobe_list() (Phase-1 single-layer path) and never sees the
-// coat/fuzz fields, producing a target_pdf that disagrees with the shade path's
-// bsdf.evaluate() — see plan resilient-herding-kahn.md.
+// below calls make_material_bsdf() (Phase-1 single-layer path) and never sees
+// the coat/fuzz fields, producing a target_pdf that disagrees with the shade
+// path's bsdf.evaluate() — see plan resilient-herding-kahn.md.
 //
 // Glass gate reads bsdf.bsdf_type (the BSDF carries the same value as
 // SurfaceData::bsdf_type — make_bsdf() propagates it verbatim).
@@ -609,18 +674,15 @@ struct ProceduralTriData {
     Float3 result = def(make_float3(0.0f));
     out_specular = def(make_float3(0.0f));
     $if(material_type != 3u) {
-        MaterialBSDF bsdf{
+        MaterialBSDF bsdf = make_material_bsdf(
             base_color, roughness, metallic, ior,
             sheen_val, sheen_tint_val,
             clearcoat_val, clearcoat_gloss_val,
             iridescence_val, iridescence_ior_val, iridescence_thickness_val,
             anisotropic_val, anisotropic_rot_val,
             tangent_dir, bitangent_sign,
-            0u, 0.f, 0.f, 0.f, 0.f,
-            conductor_eta, 0.f, 1.f,
-            conductor_k};
-        bsdf.build_lobe_list();
-        bsdf.precompute_tangent_rotation(ns);
+            conductor_eta, conductor_k,
+            ns);
         Float3 diff_brdf, spec_brdf;
         bsdf.evaluate_split(wo, light_dir, ns, diff_brdf, spec_brdf);
         Float3 geom = emission * cos_shading * cos_light / dist_sq;
@@ -657,26 +719,15 @@ struct ProceduralTriData {
     Float3 conductor_k = luisa::compute::make_float3(0.f, 0.f, 0.f)) noexcept {
     Float3 result = def(make_float3(0.0f));
     $if(material_type != 3u) {
-        // MaterialBSDF has 25 fields — fill all positions explicitly so the
-        // complex-IOR slot receives the caller's value, not the (0,0,0) default.
-        MaterialBSDF bsdf{
+        MaterialBSDF bsdf = make_material_bsdf(
             base_color, roughness, metallic, ior,
             sheen_val, sheen_tint_val,
             clearcoat_val, clearcoat_gloss_val,
             iridescence_val, iridescence_ior_val, iridescence_thickness_val,
             anisotropic_val, anisotropic_rot_val,
             tangent_dir, bitangent_sign,
-            0u,                           // bsdf_type
-            0.f,                          // flatness_val
-            0.f,                          // fabric_val
-            0.f,                          // specular_tint_val
-            0.f,                          // specular_trans_val
-            conductor_eta,                // attenuation_val (overloaded as conductor_eta_re)
-            0.f,                          // diffuse_trans_val
-            1.f,                          // attenuation_distance_val
-            conductor_k};                 // conductor_k_val
-        bsdf.build_lobe_list();
-        bsdf.precompute_tangent_rotation(ns);
+            conductor_eta, conductor_k,
+            ns);
         Float3 brdf = bsdf.evaluate(wo, light_dir, ns);
         result = emission * brdf * cos_shading * cos_light / dist_sq;
     };
@@ -733,18 +784,15 @@ struct ProceduralTriData {
     Float cos_theta = max(0.0f, dot(ns, wi));
     Float3 result = def(make_float3(0.0f));
     $if(material_type != 3u) {
-        MaterialBSDF bsdf{
+        MaterialBSDF bsdf = make_material_bsdf(
             base_color, roughness, metallic, ior,
             sheen_val, sheen_tint_val,
             clearcoat_val, clearcoat_gloss_val,
             iridescence_val, iridescence_ior_val, iridescence_thickness_val,
             anisotropic_val, anisotropic_rot_val,
             tangent_dir, bitangent_sign,
-            0u, 0.f, 0.f, 0.f, 0.f,
-            conductor_eta, 0.f, 1.f,
-            conductor_k};
-        bsdf.build_lobe_list();
-        bsdf.precompute_tangent_rotation(ns);
+            conductor_eta, conductor_k,
+            ns);
         Float3 brdf = bsdf.evaluate(wo, wi, ns);
         result = env_radiance * brdf * cos_theta;
     };
@@ -920,7 +968,7 @@ struct ProceduralTriData {
     const BindlessVar& vertex_bindless,
     UInt vertex_slot, UInt tri_slot, UInt prim_id, Float2 bary) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -957,7 +1005,7 @@ struct UnjitHit {
     Float2 jit_bary,
     Float3 cam_origin, Float3 unjit_dir) noexcept {
     using Triangle = luisa::compute::Triangle;
-    using Vertex   = newtype::util::Vertex;
+    using Vertex   = newtype::util::ActiveVertex;   // GPU layout (A2)
 
     auto tri = vertex_bindless.buffer<Triangle>(tri_slot).read(prim_id);
     auto v0  = vertex_bindless.buffer<Vertex>(vertex_slot).read(tri.i0);
@@ -1156,7 +1204,8 @@ struct UnjitHit {
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
     UInt screen_h = 0u,
-    UInt instance_flags = 0u) noexcept {
+    UInt instance_flags = 0u,
+    UInt instance_index = 0u) noexcept {
 
     SurfaceData s;
 
@@ -1214,6 +1263,30 @@ struct UnjitHit {
         s.metallic  = metallic_result;
         s.ao        = ao_result;
     }
+    {
+        // Iridescence thickness map — R = factor mask (multiplies the
+        // iridescence strength), G = thickness mix parameter:
+        //   thickness = mix(thickness_min, thickness_max, G)
+        // Active only when a texture is bound AND thickness_max >= 0 (the -1
+        // sentinel keeps untextured materials on the flat thickness).
+        UInt irid_slot = ite(material.iridescenceTexIdx >= 0,
+                             cast<uint>(material.iridescenceTexIdx), 0u);
+        Float iridescence_result;
+        Float thickness_result;
+        $if(material.iridescenceTexIdx >= 0) {
+            Float4 irid_sample = tex_bindless->tex2d(irid_slot).sample(uv);
+            iridescence_result = material.iridescence * irid_sample.x;
+            thickness_result = ite(material.iridescence_thickness_max >= 0.0f,
+                lerp(material.iridescence_thickness,
+                     material.iridescence_thickness_max, irid_sample.y),
+                material.iridescence_thickness);
+        } $else {
+            iridescence_result = material.iridescence;
+            thickness_result = material.iridescence_thickness;
+        };
+        s.iridescence           = iridescence_result;
+        s.iridescence_thickness = thickness_result;
+    }
 
     // --- Copy non-textured parameters ---
     s.ior                   = material.ior;
@@ -1222,9 +1295,7 @@ struct UnjitHit {
     s.sheen_tint            = material.sheen_tint;
     s.clearcoat             = material.clearcoat;
     s.clearcoat_gloss       = material.clearcoat_gloss;
-    s.iridescence           = material.iridescence;
     s.iridescence_ior       = material.iridescence_ior;
-    s.iridescence_thickness = material.iridescence_thickness;
     s.anisotropic           = material.anisotropic;
     s.anisotropic_rot       = material.anisotropic_rot;
     s.attenuation           = material.attenuation;
@@ -1232,9 +1303,13 @@ struct UnjitHit {
     s.conductor_k           = material.conductor_k;
     s.specular_tint         = material.specular_tint;
     s.specular_trans        = material.specular_trans;
+    s.dispersion            = material.dispersion;
     s.flatness              = material.flatness;
     s.diffuse_trans         = material.diffuse_trans;
     s.fabric                = material.fabric;
+    // Glass-blend default (1 = pure glass). Set BEFORE the callable dispatch
+    // so custom resolvers can lower it; built-in glass never touches it.
+    s.glass_blend           = 1.0f;
     s.material_type         = material.type;
     s.bsdf_type             = get_effective_bsdf_type(material);
 
@@ -1260,6 +1335,9 @@ struct UnjitHit {
 
     // --- UV (for downstream custom callables) ---
     s.uv = uv;
+
+    // --- Instance identity (track B2): visible to custom callables below. ---
+    s.instance_index = instance_index;
 
     // --- Material Callable Dispatch (Polymorphic) ---
     // Per-type resolvers transform surface parameters (procedural effects).
@@ -1308,6 +1386,65 @@ struct UnjitHit {
     return s;
 }
 
+//==============================================================================
+// Slim resolve for shadow walks (perf review 2026-09 item 6).
+//
+// trace_shadow's transparent path (shared walk + dispersive sub-walks)
+// consumes exactly four material scalars — ior, dispersion, attenuation,
+// attenuation_distance — plus the interpolated geometric normal. The full
+// resolve additionally samples up to 4 textures, reconstructs
+// tangent/UV/position, perturbs the normal map, and computes MS-GGX
+// invariants, none of which the walk reads. For built-in material types
+// (< 14) the resolver is the identity no-op, so those scalars are exact
+// copies of the MaterialData fields and the slim path skips everything
+// else. Custom resolvers (>= 14) may drive ior/attenuation procedurally,
+// so they fall back to the full resolve (sharing the same fused triangle
+// fetch). Bit-identical to the former resolve_surface + unfused
+// reconstruct_normal pair by construction (same math, same source values).
+//==============================================================================
+struct ShadowSurfaceData {
+    Float3 geo_ns;                 // world-space interpolated geometric normal
+    Float   ior;
+    Float   dispersion;
+    Float3 attenuation;
+    Float   attenuation_distance;
+    Float   glass_blend;           // 1 = pure glass (see SurfaceData.glass_blend)
+};
+
+[[nodiscard]] inline ShadowSurfaceData resolve_shadow_surface(
+    const SurfaceResolverPoly& polymorphic,
+    const BindlessVar& vertex_bindless,
+    const BindlessVar& tex_bindless,
+    UInt vertex_slot, UInt tri_slot, UInt prim_id, Float2 bary,
+    Var<MaterialData> material,
+    Float3 wo,
+    Float4x4 instance_transform,
+    UInt instance_index = 0u) noexcept {
+    // One fused fetch (1 triangle + 3 vertices) serves both the normal and
+    // the custom-resolver fallback; the former call sites paid this twice
+    // (once inside resolve_surface, once via the unfused reconstruct_normal).
+    MeshTriVerts tv = read_mesh_triangle(vertex_bindless, vertex_slot, tri_slot, prim_id);
+    ShadowSurfaceData s;
+    s.geo_ns = transform_normal(instance_transform, reconstruct_normal(tv, bary));
+    $if(material.type >= 14u) {
+        SurfaceData full = resolve_surface_verts(
+            polymorphic, tex_bindless, tv, bary, material, wo,
+            instance_transform, 0.0f, make_float2(0.0f), 0u, 0u, 0u, instance_index);
+        s.ior                  = full.ior;
+        s.dispersion           = full.dispersion;
+        s.attenuation          = full.attenuation;
+        s.attenuation_distance = full.attenuation_distance;
+        s.glass_blend          = full.glass_blend;
+    } $else {
+        s.ior                  = material.ior;
+        s.dispersion           = material.dispersion;
+        s.attenuation          = material.attenuation;
+        s.attenuation_distance = material.attenuation_distance;
+        s.glass_blend          = 1.0f;
+    };
+    return s;
+}
+
 /// Resolve all surface parameters from material data + texture sampling.
 ///
 /// This is the central function that connects the texture bindless array
@@ -1330,6 +1467,7 @@ struct UnjitHit {
 /// @param screen_uv        Screen-space UV [0,1] for screen-space effects (default 0)
 /// @param screen_w         Screen width (default 0)
 /// @param screen_h         Screen height (default 0)
+/// @param instance_index   TLAS instance row (track B2; default 0 = unknown)
 [[nodiscard]] inline SurfaceData resolve_surface(
     const SurfaceResolverPoly& polymorphic,
     const BindlessVar& vertex_bindless,
@@ -1342,11 +1480,12 @@ struct UnjitHit {
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
     UInt screen_h = 0u,
-    UInt instance_flags = 0u) noexcept {
+    UInt instance_flags = 0u,
+    UInt instance_index = 0u) noexcept {
 
     MeshTriVerts tv = read_mesh_triangle(vertex_bindless, vertex_slot, tri_slot, prim_id);
     return resolve_surface_verts(polymorphic, tex_bindless, tv, bary, material, wo,
-        instance_transform, time, screen_uv, screen_w, screen_h, instance_flags);
+        instance_transform, time, screen_uv, screen_w, screen_h, instance_flags, instance_index);
 }
 
 //==============================================================================
@@ -1373,7 +1512,8 @@ struct UnjitHit {
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
     UInt screen_h = 0u,
-    UInt instance_flags = 0u) noexcept {
+    UInt instance_flags = 0u,
+    UInt instance_index = 0u) noexcept {
 
     // --- Accumulators for weighted blend ---
     Float3 accum_albedo   = def(make_float3(0.0f));
@@ -1399,9 +1539,11 @@ struct UnjitHit {
     Float3 accum_conductor_k     = def(make_float3(0.0f));
     Float  accum_specular_tint  = def(0.0f);
     Float  accum_specular_trans = def(0.0f);
+    Float  accum_dispersion     = def(0.0f);
     Float  accum_flatness       = def(0.0f);
     Float  accum_diffuse_trans  = def(0.0f);
     Float  accum_fabric         = def(0.0f);
+    Float  accum_glass_blend    = def(0.0f);
     Float  total_weight         = def(0.0f);
 
     // Layer 0's classification (determines downstream BSDF dispatch)
@@ -1419,7 +1561,8 @@ struct UnjitHit {
 
             SurfaceData layer_s = resolve_surface_verts(
                 polymorphic, tex_bindless, tv, bary,
-                layer_mat, wo, instance_transform, time, screen_uv, screen_w, screen_h);
+                layer_mat, wo, instance_transform, time, screen_uv, screen_w, screen_h,
+                0u, instance_index);
 
             accum_albedo               += layer_s.albedo * weight;
             accum_emission             += layer_s.emission * weight;
@@ -1442,9 +1585,11 @@ struct UnjitHit {
             accum_conductor_k          += layer_s.conductor_k * weight;
             accum_specular_tint        += layer_s.specular_tint * weight;
             accum_specular_trans       += layer_s.specular_trans * weight;
+            accum_dispersion           += layer_s.dispersion * weight;
             accum_flatness             += layer_s.flatness * weight;
             accum_diffuse_trans        += layer_s.diffuse_trans * weight;
             accum_fabric               += layer_s.fabric * weight;
+            accum_glass_blend          += layer_s.glass_blend * weight;
             total_weight               += weight;
 
             // Capture layer 0's type
@@ -1480,9 +1625,11 @@ struct UnjitHit {
     s.conductor_k           = accum_conductor_k * inv_w;
     s.specular_tint         = accum_specular_tint * inv_w;
     s.specular_trans        = accum_specular_trans * inv_w;
+    s.dispersion            = accum_dispersion * inv_w;
     s.flatness              = accum_flatness * inv_w;
     s.diffuse_trans         = accum_diffuse_trans * inv_w;
     s.fabric                = accum_fabric * inv_w;
+    s.glass_blend           = accum_glass_blend * inv_w;
 
     // --- Geometry from layer 0 (shared across all layers) ---
     // resolve_surface() already reconstructed geometry per-layer,
@@ -1593,6 +1740,7 @@ struct UnjitHit {
     s.attenuation_distance = pmat.attenuation_distance;
     s.specular_tint       = pmat.specular_tint;
     s.specular_trans      = pmat.specular_trans;
+    s.dispersion          = pmat.dispersion;
     s.flatness            = pmat.flatness;
     s.fabric              = pmat.fabric;
     s.diffuse_trans       = 0.f;
@@ -1665,6 +1813,12 @@ struct UnjitHit {
     // its own copy; MaterialData is small and we need it for the dispatch index).
     Var<scene::ProcInstanceData> proc_inst = proc_bindless.buffer<scene::ProcInstanceData>(kSlot_ProcInstances).read(inst_id);
     Var<MaterialData> pmat = material_buffer.read(Expr{proc_inst.material_layers & 0xFFu});
+
+    // Track B2: instance identity for callables. Procedural surfaces carry
+    // the PROCEDURAL instance index (an AABB-row id, not a TLAS row) —
+    // hash-style variation works uniformly; instance_params() rows are
+    // mesh-only.
+    s.instance_index = inst_id;
 
     polymorphic.dispatch(pmat.type, [&](const SurfaceResolver* resolver) {
         resolver->resolve(s, pmat, screen_uv, wo, time,
@@ -1747,11 +1901,28 @@ struct UnjitHit {
             s.ao        = rma_sample.z;
         };
     }
+    {
+        // Iridescence thickness map (same convention as resolve_surface_verts)
+        UInt irid_slot = ite(pmat.iridescenceTexIdx >= 0,
+                             cast<uint>(pmat.iridescenceTexIdx), 0u);
+        $if(pmat.iridescenceTexIdx >= 0) {
+            Float4 irid_sample = tex_bindless->tex2d(irid_slot).sample(uv);
+            s.iridescence = pmat.iridescence * irid_sample.x;
+            s.iridescence_thickness = ite(pmat.iridescence_thickness_max >= 0.0f,
+                lerp(pmat.iridescence_thickness,
+                     pmat.iridescence_thickness_max, irid_sample.y),
+                pmat.iridescence_thickness);
+        };
+    }
 
     // Normal map perturbation
     s.ns = perturb_normal(s.geo_ns, s.tangent, s.tangent_w,
                           pmat.normalTexIdx, uv, tex_bindless);
     s.ns = ite(dot(wo, s.ns) < 0.0f, -s.ns, s.ns);
+
+    // Track B2: instance identity for callables (procedural index — see the
+    // non-textured resolve_procedural_surface above).
+    s.instance_index = inst_id;
 
     // Polymorphic dispatch — UV already in s.uv
     polymorphic.dispatch(pmat.type, [&](const SurfaceResolver* resolver) {
@@ -1776,8 +1947,10 @@ struct UnjitHit {
 ///   base  : everything else (Diffuse/Conductor/Plastic/Fabric/Subsurface/
 ///           ThinDielectric/Unlit/Emissive, OR Dielectric at layer 0).
 ///           Layer 0 is always dominant (weight 1.0 > frac(meta)).
-///   modifier (Anisotropy/Iridescence): Phase 2D does NOT implement modifier
-///           blending — modifier layers are silently dropped. Deferred.
+///   modifier (Anisotropy 9/Iridescence 10): transformative — composed into
+///           the base's fields right after classification (§2b): strength
+///           blended by layer weight, highest-weight layer of each kind wins;
+///           the iridescence film's IOR/thickness replace the base's.
 ///
 /// Composition (layered slot layout):
 ///   slot 0 : coat Clearcoat (additive)            [weight 0 if no coat]
@@ -1810,7 +1983,8 @@ struct UnjitHit {
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
     UInt screen_h = 0u,
-    UInt instance_flags = 0u) noexcept {
+    UInt instance_flags = 0u,
+    UInt instance_index = 0u) noexcept {
 
     // ------------------------------------------------------------------
     // 1. Resolve layer 0 → base_s. Geometry and base material come from here.
@@ -1821,7 +1995,7 @@ struct UnjitHit {
     SurfaceData base_s = resolve_surface_verts(
         polymorphic, tex_bindless, tv, bary,
         layer0_mat, wo, instance_transform, time, screen_uv, screen_w, screen_h,
-        instance_flags);
+        instance_flags, instance_index);
 
     // ------------------------------------------------------------------
     // 2. Loop layers 1-3: classify coat / fuzz candidates, pick highest weight.
@@ -1842,6 +2016,24 @@ struct UnjitHit {
     Float coat_ior_v    = def(1.5f);
     Float coat_rough_v  = def(0.f);
     Float coat_att_x    = def(1.f), coat_att_y = def(1.f), coat_att_z = def(1.f);
+    Int   coat_normal_tex = def(-1);   // coat layer's own normal map (Clearcoat)
+
+    // Modifier params (Anisotropy 9 / Iridescence 10): transformative — the
+    // highest-weight layer of each kind wins and is composed into the base's
+    // fields after the loop (section 2b). Not additive lobes: they occupy no
+    // lobe-list slots; the base's anisotropy/iridescence fields are what
+    // MaterialBSDF reads.
+    UInt  mod_aniso_idx     = def(0xFFu);
+    Float mod_aniso_w       = def(-1.f);
+    Float mod_aniso_v       = def(0.f);
+    Float mod_aniso_rot     = def(0.f);
+    UInt  mod_irid_idx      = def(0xFFu);
+    Float mod_irid_w        = def(-1.f);
+    Float mod_irid_v        = def(0.f);
+    Float mod_irid_ior      = def(1.3f);
+    Float mod_irid_thick    = def(0.f);
+    Float mod_irid_thick_max= def(-1.f);
+    Int   mod_irid_tex      = def(-1);
 
     for (uint layer = 1; layer < 4; ++layer) {
         UInt mat_idx = (material_layers >> (layer * 8u)) & 0xFFu;
@@ -1857,6 +2049,8 @@ struct UnjitHit {
             Bool is_coat_clearcoat = (mtype == 7u);
             Bool is_coat_dielectric = (mtype == 3u);
             Bool is_fuzz = (mtype == 8u);
+            Bool is_mod_aniso = (mtype == 9u);
+            Bool is_mod_irid  = (mtype == 10u);
 
             $if(is_coat_clearcoat | is_coat_dielectric) {
                 coat_idx    = layer;
@@ -1869,6 +2063,7 @@ struct UnjitHit {
                 coat_att_x  = layer_mat.attenuation.x;
                 coat_att_y  = layer_mat.attenuation.y;
                 coat_att_z  = layer_mat.attenuation.z;
+                coat_normal_tex = layer_mat.normalTexIdx;
             };
             $if(is_fuzz) {
                 fuzz_idx      = layer;
@@ -1880,16 +2075,66 @@ struct UnjitHit {
                 fuzz_sheen_t  = layer_mat.sheen_tint;
                 fuzz_sheen_rough = layer_mat.roughness;
             };
+            $if(is_mod_aniso & (weight > mod_aniso_w)) {
+                mod_aniso_idx = layer;
+                mod_aniso_w   = weight;
+                mod_aniso_v   = layer_mat.anisotropic;
+                mod_aniso_rot = layer_mat.anisotropic_rot;
+            };
+            $if(is_mod_irid & (weight > mod_irid_w)) {
+                mod_irid_idx      = layer;
+                mod_irid_w        = weight;
+                mod_irid_v        = layer_mat.iridescence;
+                mod_irid_ior      = layer_mat.iridescence_ior;
+                mod_irid_thick    = layer_mat.iridescence_thickness;
+                mod_irid_thick_max= layer_mat.iridescence_thickness_max;
+                mod_irid_tex      = layer_mat.iridescenceTexIdx;
+            };
         };
     }
 
     // ------------------------------------------------------------------
+    // 2b. Compose modifier layers into the base. Anisotropy/Iridescence are
+    //     transformative modifiers, not additive lobes: blend the matching
+    //     base fields (strength by layer weight; the film's IOR/thickness
+    //     replace — the film being added is the modifier's, texture-mapped
+    //     when it carries a thickness map). Applied BEFORE the coat/fuzz
+    //     short-circuit so modifier-only stacks still take effect through
+    //     the single-layer path. No modifier layers → zero field changes
+    //     (bit-identical). Note: the MS-GGX invariants hoisted inside
+    //     resolve_surface_verts keep the base's pre-modifier anisotropy —
+    //     acceptable for a compensation fit, not an energy term.
+    // ------------------------------------------------------------------
+    $if(mod_aniso_idx != 0xFFu) {
+        base_s.anisotropic     = lerp(base_s.anisotropic,     mod_aniso_v,   mod_aniso_w);
+        base_s.anisotropic_rot = lerp(base_s.anisotropic_rot, mod_aniso_rot, mod_aniso_w);
+    };
+    $if(mod_irid_idx != 0xFFu) {
+        Float mod_strength  = mod_irid_v;
+        Float mod_thickness = mod_irid_thick;
+        $if(mod_irid_tex >= 0) {
+            // Safe index even for speculative evaluation (perturb_normal
+            // convention); same R/G thickness-map layout as the base path.
+            UInt irid_slot = ite(mod_irid_tex >= 0, cast<uint>(mod_irid_tex), 0u);
+            Float4 irid_sample = tex_bindless->tex2d(irid_slot).sample(base_s.uv);
+            mod_strength  *= irid_sample.x;
+            mod_thickness  = ite(mod_irid_thick_max >= 0.f,
+                lerp(mod_irid_thick, mod_irid_thick_max, irid_sample.y),
+                mod_thickness);
+        };
+        base_s.iridescence           = lerp(base_s.iridescence, mod_strength, mod_irid_w);
+        base_s.iridescence_ior       = mod_irid_ior;
+        base_s.iridescence_thickness = mod_thickness;
+    };
+
+    // ------------------------------------------------------------------
     // 3. Short-circuit: if no coat AND no fuzz candidate was found in
-    // layers 1-3 (sentinel 0xFF slots, or non-coat/non-fuzz materials
-    // which the loop silently ignores), the layering is a no-op. Return
-    // base_s with composed_lobe_list_count left at 0 so make_bsdf() runs
-    // the standard single-layer path — bit-identical to non-layered
-    // instances, and skips all of: base_bsdf.make_bsdf(), F_coat,
+    // layers 1-3 (sentinel 0xFF slots, or materials outside the
+    // coat/fuzz/modifier roles which the loop ignores), the layering is a
+    // no-op beyond any §2b modifier composition. Return base_s with
+    // composed_lobe_list_count left at 0 so make_bsdf() runs the standard
+    // single-layer path — bit-identical to non-layered instances (when no
+    // modifiers fired), and skips all of: base_bsdf.make_bsdf(), F_coat,
     // composed-list build, and coat/fuzz field forwarding.
     //
     // This is the main perf recover from the lobe-list layering fix
@@ -1899,6 +2144,20 @@ struct UnjitHit {
     Bool has_coat = coat_idx != 0xFFu;
     Bool has_fuzz = fuzz_idx != 0xFFu;
     Bool has_any_layer = has_coat | has_fuzz;
+
+    // Coat shading normal: the coat layer's own normal map (Clearcoat-type
+    // layers carry normalTexIdx), perturbed from geo_ns over the base tangent
+    // frame — already world space here (resolve_surface_verts ran
+    // transform_surface_normals). An independent second normal lets the coat
+    // sparkle (orange peel) over a differently-mapped base. No coat normal
+    // texture → ns, bit-identical to the legacy shared-normal behavior.
+    Float3 coat_ns_v = base_s.ns;
+    $if(has_coat) {
+        Float3 coat_n = perturb_normal(base_s.geo_ns, base_s.tangent, base_s.tangent_w,
+                                       coat_normal_tex, base_s.uv, tex_bindless);
+        coat_n = ite(dot(wo, coat_n) < 0.0f, -coat_n, coat_n);
+        coat_ns_v = ite(coat_normal_tex >= 0, coat_n, base_s.ns);
+    };
 
     SurfaceData s = base_s;  // composed_lobe_list_count defaults to 0
     $if(has_any_layer) {
@@ -1910,8 +2169,10 @@ struct UnjitHit {
         // 4. Compute F12 (air→coat) and F23 (coat→base) Fresnel terms.
         //    base_scale = (1-F12)·(1-F23) when NT_ENABLE_TWO_INTERFACE_FRESNEL,
         //    otherwise (1-F12) only (legacy single-interface path, bit-identical).
+        //    Both interfaces live on the COAT surface — evaluate at the coat
+        //    normal (= ns when the coat has no normal map of its own).
         // ------------------------------------------------------------------
-        Float cos_theta_o = max(dot(wo, base_s.ns), 0.f);
+        Float cos_theta_o = max(dot(wo, coat_ns_v), 0.f);
         Float F12 = def(0.f);
         Float F23 = def(0.f);
         $if(has_coat) {
@@ -1961,7 +2222,7 @@ struct UnjitHit {
         // ------------------------------------------------------------------
         // 5. Build composed LobeList.
         // ------------------------------------------------------------------
-        LobeList composed;
+        LobeListData composed;
         for (uint i = 0u; i < LobeList::kMaxLobes; ++i) {
             composed.type_flags[i] = pack_lobe(static_cast<uint>(LobeType::Diffuse), 0u);
             composed.weights[i]    = 0.f;
@@ -2037,6 +2298,7 @@ struct UnjitHit {
             s.coat_ior                 = coat_ior_v;
             s.coat_roughness           = coat_rough_v;
             s.coat_attenuation         = make_float3(coat_att_x, coat_att_y, coat_att_z);
+            s.coat_ns                  = coat_ns_v;
             // Forward F12 / F23 so evaluate / evaluate_split don't recompute.
             s.coat_F12                 = F12;
             s.coat_F23                 = F23;
@@ -2074,7 +2336,8 @@ struct UnjitHit {
     Float time = 0.0f,
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
-    UInt screen_h = 0u) noexcept {
+    UInt screen_h = 0u,
+    UInt instance_index = 0u) noexcept {
 
     UInt material_layers = inst_data.y;
     UInt inst_flags = inst_data.x;
@@ -2090,14 +2353,14 @@ struct UnjitHit {
             inst_data.z, inst_data.w, prim_id, bary,
             material_layers, material_buffer,
             wo, instance_transform, time, screen_uv, screen_w, screen_h,
-            inst_flags);
+            inst_flags, instance_index);
     } $else {
         Var<MaterialData> material = material_buffer.read(Expr{material_layers & 0xFFu});
         surface = resolve_surface(polymorphic,
             vertex_bindless, tex_bindless,
             inst_data.z, inst_data.w, prim_id, bary,
             material, wo, instance_transform, time, screen_uv, screen_w, screen_h,
-            inst_flags);
+            inst_flags, instance_index);
     };
     return surface;
 }
@@ -2120,7 +2383,8 @@ struct UnjitHit {
     Float time = 0.0f,
     Float2 screen_uv = make_float2(0.0f),
     UInt screen_w = 0u,
-    UInt screen_h = 0u) noexcept {
+    UInt screen_h = 0u,
+    UInt instance_index = 0u) noexcept {
 
     UInt material_layers = inst_data.y;
     UInt inst_flags = inst_data.x;
@@ -2134,13 +2398,13 @@ struct UnjitHit {
             inst_data.z, inst_data.w, prim_id, bary,
             material_layers, material_buffer,
             wo, instance_transform, time, screen_uv, screen_w, screen_h,
-            inst_flags);
+            inst_flags, instance_index);
     } $else {
         Var<MaterialData> material = material_buffer.read(Expr{material_layers & 0xFFu});
         surface = resolve_surface_verts(
             polymorphic, tex_bindless, tv, bary,
             material, wo, instance_transform, time, screen_uv, screen_w, screen_h,
-            inst_flags);
+            inst_flags, instance_index);
     };
     return surface;
 }

@@ -1,0 +1,10 @@
+// Precompiled header for the {{ shader_name }} hot-reload DLL.
+// The heavy template headers (engine headers + LuisaCompute DSL) dominate
+// the single-TU compile (~9s without a PCH). Compiled once via pch.cpp; the
+// editable {{ shader_name }}.cpp consumes it through ForcedIncludeFiles,
+// so the shader source keeps its own include list untouched.
+#pragma once
+
+{% for inc in pch_includes %}
+#include {{ inc }}
+{% endfor %}

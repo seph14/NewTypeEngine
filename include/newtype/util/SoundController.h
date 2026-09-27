@@ -5,6 +5,7 @@
 #if NT_ENABLE_AUDIO
 
 #include "cinder/audio/audio.h"
+#include "cinder/DataSource.h"
 #include "cinder/Filesystem.h"
 #include "cinder/Json.h"
 #include <string>
@@ -26,11 +27,16 @@ namespace newtype::util {
 class SoundController {
 public:
     /// One active audio graph (BufferPlayer -> Gain -> output) per playing instance.
+    /// Spatial voices insert an ambisonics encoder after the gain
+    /// (BufferPlayer -> Gain -> Encoder -> binaural bus -> output) and keep it
+    /// in `spatialEncoder` for teardown on retire.
     struct SoundEffectNode {
         ci::audio::BufferPlayerNodeRef node;
         ci::audio::GainNodeRef         gain;
+        ci::audio::NodeRef             spatialEncoder;
         float                          level    = 0.f;
         bool                           autoFade = false;
+        bool                           isSpatial = false;
     };
 
 private:
@@ -42,6 +48,7 @@ private:
     };
 
     float                                           _level = 1.f;
+    bool                                            _audioAvailable = false;
     ci::audio::NodeRef                              _output;
     SoundEffectNode                                 _bgm;
     std::unordered_map<std::string, EffectDef>      _effects;
@@ -49,6 +56,11 @@ private:
     int                                             _testUid = 0;
 
     SoundController();
+
+    /// Shared one-shot builder; `worldPos` (optional) routes the voice
+    /// through the spatial bus when spatial audio is available.
+    void playEffectInternal(const std::string& id, int uid, float level,
+                            const ci::vec3* worldPos);
 
 public:
     ~SoundController();
@@ -72,7 +84,12 @@ public:
     void update();
 
     // ---------- BGM (dedicated API) ----------
+    /// Asset-relative path version (resolves via `ci::app::loadAsset`).
     void playBackgroundTrack    (const ci::fs::path& assetPath, float level);
+    /// Data-source version: accepts `app::loadAsset("audio/x.wav")` or
+    /// `app::loadResource(RES_NAME)` directly, so call sites written with the
+    /// asset literal are Bundler-convertible.
+    void playBackgroundTrack    (const ci::DataSourceRef& source, float level);
     void setBackgroundTrackLevel(float level);
     void stopBackgroundTrack    ();
 
@@ -82,6 +99,8 @@ public:
     /// Append one variation buffer to an existing effect. Resolves `assetPath`
     /// via `ci::app::loadAsset`, so asset-relative paths work.
     void addEffectTrack  (const std::string& id, const ci::fs::path& assetPath);
+    /// Data-source version of addEffectTrack (see playBackgroundTrack).
+    void addEffectTrack  (const std::string& id, const ci::DataSourceRef& source);
     /// Scan a folder (resolved via `ci::app::getAssetPath`) for audio files
     /// and register each as a variation.
     void loadEffectFolder(const std::string& id, float fadeRate,
@@ -94,6 +113,14 @@ public:
     /// active, this is a no-op (matches ref dedup). Picks a random variation
     /// buffer and auto-fades immediately so the one-shot naturally decays.
     void playEffect   (const std::string& id, int uid, float level);
+    /// Spatial variant: the one-shot is encoded as a 3rd-order ambisonic
+    /// point source at `worldPos` (world space) and decoded binaurally.
+    /// Distance attenuation (min(1, ref/d)) is applied on the voice gain.
+    /// Multi-channel assets are L/R-averaged by the encoder — author spatial
+    /// one-shots as mono for full control. Falls back to the non-spatial
+    /// path when spatial audio is unavailable.
+    void playEffect   (const std::string& id, int uid, float level,
+                       const ci::vec3& worldPos);
     /// Mark an active instance for fade-out. No-op if not currently playing.
     void fadeOutEffect(const std::string& id, int uid);
     [[nodiscard]] bool isPlaying(const std::string& id, int uid) const;
@@ -124,8 +151,7 @@ public:
     template<typename... A> void loadEffectFolder       (A&&...) {}
     template<typename... A> void loadConfig             (A&&...) {}
     template<typename... A> void playEffect             (A&&...) {}
-    template<typename... A> void fadeOutEffect          (A&&...) {}
-    template<typename... A> bool isPlaying              (A&&...) const { return false; }
+    template<typename... A> void fadeOutEffect          (A&&...) {}    template<typename... A> bool isPlaying              (A&&...) const { return false; }
     template<typename... A> void drawUi                 (A&&...) {}
 };
 } // namespace newtype::util

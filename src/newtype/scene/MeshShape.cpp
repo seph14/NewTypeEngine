@@ -3,6 +3,7 @@
 //
 
 #include "newtype/scene/MeshShape.h"
+#include "cinder/Log.h"
 
 namespace newtype::scene {
 
@@ -88,6 +89,14 @@ bool MeshShape::load_from(ci::TriMesh &triMesh) noexcept {
     }
     
     _has_cpu_data = true;
+
+    // A1: weld bit-identical duplicate vertices (importer index seams) —
+    // bit-identical rendering, smaller vertex buffer + BLAS.
+    if (const size_t removed = util::weld_vertices(_vertices, _triangles); removed > 0u) {
+        _numVertices = static_cast<uint32_t>(_vertices.size());
+        CI_LOG_I("MeshShape::load_from: welded " << removed
+            << " duplicate vertices (" << _numVertices << " remain)");
+    }
     return true;
 }
 
@@ -123,9 +132,11 @@ void MeshShape::build(luisa::compute::Stream &stream) noexcept {
     if (_vertices.empty() || _triangles.empty()) 
         return;
 
-    // Create vertex buffer
-    _vertex_buffer = _device.create_buffer<Vertex>(_numVertices);
-    stream << _vertex_buffer.copy_from(_vertices.data());
+    // Create vertex buffer (A2: ActiveVertex layout — fp32 identity or
+    // snorm10-packed; upload stages through the CPU authoring cache).
+    _vertex_buffer = _device.create_buffer<GpuVertex>(_numVertices);
+    util::upload_vertex_buffer(_vertex_buffer,
+                               std::span<const Vertex>{_vertices}, stream);
 
     // Create triangle buffer
     _triangle_buffer = _device.create_buffer<Triangle>(_numTriangle);

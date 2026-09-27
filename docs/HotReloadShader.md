@@ -96,7 +96,7 @@ public:
 };
 ```
 
-The DLL project must export `createMyShader(Device&)` and `destroyMyShader(Resource*)`. See `runtime_shaders/PathTracerShader/PathTracerShader.cpp` for a complete reference — the export macros (`PATH_TRACER_API`) and the `#ifndef RT_RUNTIME` guard around the `extern "C"` block are the load-bearing pieces.
+The DLL project must export `createMyShader(Device&)` and `destroyMyShader(Resource*)`. See `runtime_shaders/SimpleTestShader/SimpleTestShader.cpp` for a complete reference — the export macros (`SIMPLETEST_API`) and the `#ifndef RT_RUNTIME` guard around the `extern "C"` block are the load-bearing pieces.
 
 ### 2. Load with hot-reload enabled
 
@@ -277,4 +277,4 @@ The watch thread polls every 500 ms — saving the `.cpp` file in your editor tr
 - **`Args...` mismatch**: the template params on `shader<2, Image<float>, Accel, ...>` must match dispatch call-site types **exactly**, in order. A mismatch compiles (the cast is inside the manager) but throws `std::runtime_error` at dispatch. If you change a kernel signature, update every call site.
 - **Forgetting `processPendingReloads`**: the watch thread will log "will reload on main thread" forever but no swap ever happens. Always wire the pump into your render loop in runtime mode.
 - **DLL built against the wrong config**: hot-reload requires the **Debug_Runtime** configuration for both the app and the shader DLL. A Debug-built DLL will link but crash on first dispatch because the `Resource` vtable layout differs.
-- **Static-allocated shaders in DLLs**: avoid `static Shader s = device.compile(...)` inside the DLL. The destructor runs during `DLL_PROCESS_DETACH` and calls into the device vtable after the device-side teardown has begun. Heap-allocate and delete explicitly in `destroyXxx` — see `PathTracerShader.cpp:161-163` for the pattern.
+- **Static-allocated shaders in DLLs**: avoid `static Shader s = device.compile(...)` inside the DLL. The destructor runs during `DLL_PROCESS_DETACH` and calls into the device vtable after the device-side teardown has begun. Heap-allocate and delete explicitly in `destroyXxx` — see `SimpleTestShader.cpp:241-256` (`destroySimpleTest`) for the pattern.

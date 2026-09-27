@@ -9,6 +9,7 @@
 #include <string>
 #include <filesystem>
 #include <memory>
+#include <functional>
 
 // Include TextureConverter for MaterialTextures and MaterialTextureLoader
 #include "newtype/render/TextureConverter.h"
@@ -21,6 +22,12 @@
 
 namespace newtype::render {
 class MaterialPool;
+
+/// Parse MaterialData from a config-style JSON object (the schema written by
+/// materialDataToJson and by the external FBXImporter tool). Missing fields
+/// keep `d`'s current values — start from a default-constructed MaterialData
+/// when creating new materials (see scene::ModelLoader).
+void materialDataFromJson(const ci::Json& j, MaterialData& d);
 }
 
 //==============================================================================
@@ -41,7 +48,9 @@ LUISA_STRUCT(newtype::render::MaterialData,
               attenuation, conductor_k,
               attenuation_distance,
               iridescence_thickness, bsdf_type_override,
-              fabric) {
+              fabric,
+              iridescenceTexIdx, iridescence_thickness_max,
+              dispersion) {
 
     //==========================================================================
     // Shader Methods - Material Evaluation
@@ -180,6 +189,13 @@ using namespace luisa::compute;
  * on the CPU side. The pool stores these and provides indices.
  */
 struct Material {
+    /// First custom material-callback type id (alias of
+    /// kFirstCustomMaterialType in Material.h, derived from the last built-in
+    /// MaterialType). Reference this — never hardcode 14u — when assigning
+    /// MaterialData::type for DLL/user-registered callables, so materials
+    /// survive new built-in types (docs/custom_material_callables.md).
+    static constexpr uint CustomType = kFirstCustomMaterialType;
+
     std::string       name;           // Material name for lookup
     MaterialData      data;           // POD data for GPU
     MaterialTextures  textures;       // Owned GPU textures
@@ -206,6 +222,49 @@ struct Material {
 class MaterialPool {
 public:
     static constexpr uint kMaxMaterials = 256u;
+
+    //==========================================================================
+    // Resolver runtime params (docs/resolver_params_abi_plan.md)
+    //
+    // Custom material callables read per-callable tuning params from a small
+    // float4 buffer bound at a RESERVED SLOT of the texture bindless array
+    // (the resolver already receives it as `tex`). Values live host-side and
+    // upload on change — value edits never touch shader hashes (no DXC).
+    //==========================================================================
+
+    /// Bindless slot reserved for the params buffer (textures start at 2 —
+    /// slot 1 is the per-instance params buffer below).
+    static constexpr uint kResolverParamsBindlessSlot = 0u;
+    /// Max registered custom callables with params.
+    static constexpr uint kMaxResolverParamCallables = 16u;
+    /// Per-callable scalar budget (packed into kResolverParamsPerCallable/4 float4s).
+    static constexpr uint kResolverParamsPerCallable = 32u;
+
+    //==========================================================================
+    // Per-instance custom data (track B2, docs/vertex-packing-instancing-plan.md)
+    //
+    // Geometry authors 4-float4 rows (64 B/instance, matching ProcDeformState)
+    // keyed by TLAS instance row; custom material callables read them via
+    // instance_params(tex, s.instance_index, i) — unbounded per-instance
+    // variation without material-pool pressure. The pool hosts the buffer
+    // (it owns the texture bindless array the resolver receives as `tex`) at
+    // reserved slot 1; it materializes on the first upload, so scenes that
+    // never author per-instance data pay only a small zero-filled placeholder
+    /// Bindless slot reserved for the per-instance params buffer.
+    static constexpr uint kInstanceParamsBindlessSlot = 1u;
+    /// float4s per instance (64 B rows).
+    static constexpr uint kInstanceParamsPerInstance = 4u;
+    /// Placeholder rows bound before any upload (zero-filled; grown to the
+    /// full instance count on the first authoring).
+    static constexpr uint kInstanceParamsDefaultRows = 256u;
+
+    /// One named scalar tuning param (min/max/default drive the UI slider).
+    struct ResolverParamDesc {
+        std::string name;
+        float min_v;
+        float max_v;
+        float def_v;
+    };
 
     //==========================================================================
     // Construction
@@ -283,6 +342,69 @@ public:
     void drawUi();
 
     //==========================================================================
+    // Resolver runtime params (see constants block above)
+    //==========================================================================
+
+    /// Register (or re-register after a DLL reload) a callable's param set.
+    /// Name-keyed and stable across reloads: re-registration keeps current
+    /// values, clamping them into the (possibly changed) [min,max] range.
+    /// Returns the callable's float4 base in the params buffer — the shader
+    /// side reads `resolver_params(tex, base, i)` — or ~0u when the budget
+    /// (kMaxResolverParamCallables) is exhausted.
+    [[nodiscard]] uint registerResolverParams(
+        const std::string& callable,
+        const luisa::vector<ResolverParamDesc>& descs);
+
+    /// Set one param value by callable name + param index. Marks the buffer
+    /// dirty; the next update() uploads (2KB). Returns false if unknown.
+    [[nodiscard]] bool setResolverParamValue(
+        const std::string& callable, uint paramIndex, float value);
+
+    /// Re-apply the registered defaults (current descriptor def_v) for one
+    /// callable — the UI "Reset" button; also the explicit way to pick up
+    /// authored default changes without an engine restart. Returns false if
+    /// unknown.
+    [[nodiscard]] bool resetResolverParams(const std::string& callable);
+
+    /// Registered callables in registration order (for UI iteration).
+    [[nodiscard]] const luisa::vector<std::string>& resolverParamCallables() const noexcept {
+        return mResolverParamNames;
+    }
+    /// Descriptors of one registered callable (nullptr when unknown).
+    [[nodiscard]] const luisa::vector<ResolverParamDesc>* resolverParamDescs(
+        const std::string& callable) const noexcept;
+    /// Current value of one param (def_v when unknown).
+    [[nodiscard]] float resolverParamValue(
+        const std::string& callable, uint paramIndex) const noexcept;
+
+    /// Commit hook for the params UI: invoked on slider-commit so the owner
+    /// Pipeline can requestAccumReset() (MaterialPool cannot reach it).
+    void setAccumResetCallback(std::function<void()> cb) noexcept {
+        mAccumResetCb = std::move(cb);
+    }
+
+    //==========================================================================
+    // Per-instance custom data (see constants block; track B2)
+    //==========================================================================
+
+    /// Upload full params rows in dense TLAS order (4 float4 per instance —
+    /// rows.size() must be a multiple of kInstanceParamsPerInstance). Grows
+    /// the capacity-bound buffer (rebind + bindless update on the given
+    /// stream) when the instance count exceeds capacity; contents uploads
+    /// are plain buffer writes. Called by Geometry alongside
+    /// upload_instance_props via Pipeline::update.
+    void uploadInstanceParams(
+        luisa::compute::Stream& stream,
+        luisa::span<const luisa::float4> rows);
+
+    /// True once uploadInstanceParams has run at least once (rows resident
+    /// for every TLAS instance). Geometry consults this to keep rows
+    /// following swap-and-pop row moves.
+    [[nodiscard]] bool instanceParamsResident() const noexcept {
+        return mInstanceParamsResident;
+    }
+
+    //==========================================================================
     // Config serialization
     //==========================================================================
 
@@ -330,7 +452,7 @@ public:
     [[nodiscard]] const luisa::compute::Buffer<MaterialData>& buffer() const { return mMaterialBuffer; }
 
     // Packed per-material similarity keys {roughness, luminance(F0), luminance(albedo)}
-    // for the ReSTIR GI neighbor gates — 12 bytes instead of a 176-byte MaterialData
+    // for the ReSTIR GI neighbor gates — 12 bytes instead of a 192-byte MaterialData
     // read per comparison. Kept in lockstep with mMaterialBuffer on every upload path.
     [[nodiscard]] luisa::compute::Buffer<luisa::float3>& simKeyBuffer() { return mSimKeyBuffer; }
     [[nodiscard]] const luisa::compute::Buffer<luisa::float3>& simKeyBuffer() const { return mSimKeyBuffer; }
@@ -368,6 +490,29 @@ private:
     // Texture management
     uint                mNextTextureSlot = 0;
     luisa::vector<uint> mDirtyMaterials;
+
+    // Resolver runtime params (see public constants block)
+    luisa::compute::Buffer<luisa::float4>            mResolverParams;      // 16*8 float4
+    luisa::vector<luisa::float4>                     mResolverParamShadow; // host mirror
+    bool                                             mResolverParamsDirty = false;
+    luisa::vector<std::string>                       mResolverParamNames;  // index -> name
+    luisa::unordered_map<std::string, uint>          mResolverParamIndex;  // name -> entry
+    struct ResolverParamEntry {
+        luisa::vector<ResolverParamDesc> descs;
+        luisa::vector<float>             values;   // kResolverParamsPerCallable
+    };
+    luisa::vector<ResolverParamEntry>                mResolverParamEntries;
+    std::function<void()>                            mAccumResetCb;
+
+    // Pack one entry's scalar values into its float4 block of the shadow.
+    void _packResolverParamShadow(uint idx, const ResolverParamEntry& entry);
+
+    // Per-instance custom data (track B2): placeholder-bound at construction,
+    // materialized by uploadInstanceParams; capacity grows to cover the full
+    // instance count once any row is authored.
+    luisa::compute::Buffer<luisa::float4> mInstanceParams;
+    uint                                  mInstanceParamsCapacityRows = 0u;
+    bool                                  mInstanceParamsResident = false;
 
     // Built-in materials
     uint mDefaultMaterialIndex = 0;

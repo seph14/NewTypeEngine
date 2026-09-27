@@ -21,18 +21,58 @@ namespace newtype::core {
 	using namespace newtype::scene;
 	using namespace newtype::render;
 
-	void PassGI::compile(luisa::compute::Device& device, const SurfaceResolverPoly& resolver, bool checkerboard) {
+	void PassGI::compile(luisa::compute::Device& device, const SurfaceResolverPoly& resolver,
+	                     bool checkerboard, bool transparentShadowCasters) {
 		_checkerboard = checkerboard;
+		_transparentShadowCasters = transparentShadowCasters;
 		compileImpl(device, resolver, /*resolverOnly=*/false);
 	}
 
-	void PassGI::recompileCallables(luisa::compute::Device& device, const SurfaceResolverPoly& resolver) {
+	void PassGI::recompileCallables(luisa::compute::Device& device, const SurfaceResolverPoly& resolver,
+	                                bool transparentShadowCasters) {
+		_transparentShadowCasters = transparentShadowCasters;
 		compileImpl(device, resolver, /*resolverOnly=*/true);
 	}
 
 	void PassGI::compileImpl(luisa::compute::Device& device, const SurfaceResolverPoly& resolver, bool resolverOnly) {
-	        using Vertex = MeshShape::Vertex;
-	        using Triangle = luisa::compute::Triangle;
+		using Vertex = MeshShape::GpuVertex; // A2 active GPU layout
+		using Triangle = luisa::compute::Triangle;
+
+		// Bake the compile-time specialization snapshot: these are the exact
+		// values the former UInt kernel args (oneBounce/giScale/
+		// hasTransparentShadowCasters/sharcQueryOn) would have carried this
+		// frame, so the specialized shaders are bit-identical to the
+		// runtime-arg form. Flips are detected by specializationChanged() at
+		// the render-thread safe point and recompile through recompileCallables.
+		_bakedOneBounce = _giOneBounce ? 1u : 0u;
+		_bakedGiScale = _giHalfRes ? 2u : 1u;
+		_bakedTransparentShadowCasters = _transparentShadowCasters ? 1u : 0u;
+		_bakedSharcQueryOn = desiredSharcQueryOn();
+
+	        //==========================================================================
+	        // GIReservoir zero-fill kernel (see ZeroGIReservoirShaderType note in
+	        // PassGI.h): one thread per entry, all fields zero — M()==0==invalid.
+	        //==========================================================================
+	        _zeroGIReservoirShader = device.compile<1>([&](
+	            BufferVar<GIReservoir> buf,
+	            UInt                   count
+	        ) noexcept {
+	            set_name("GI_ZeroReservoirs");
+	            set_block_size(256u, 1u, 1u);
+	            UInt i = dispatch_id().x;
+	            $if(i < count) {
+	                Var<GIReservoir> z;
+	                z.px              = 0.0f;
+	                z.py              = 0.0f;
+	                z.pz              = 0.0f;
+	                z.packed_normal   = 0u;
+	                z.packed_radiance = 0u;
+	                z.weight_sum      = 0.0f;
+	                z.target_pdf      = 0.0f;
+	                z.packed_meta     = 0u;
+	                buf.write(i, z);
+	            };
+	        });
 
 	        //==========================================================================
 	        // GI Initial Sampling kernel (BRDF ray -> secondary hit -> evaluate direct at x2)
@@ -56,23 +96,69 @@ namespace newtype::core {
 	            UInt       presample_env_total_entries,
 	            UInt       cbField,
 	            ImageFloat glass_throughput,
-	            UInt       oneBounce,
-	            UInt       giScale,
 	            UInt       giSuppressAwayFromLight,
-	            Float      giSuppressAwayFromLightThresh,
-	            UInt       hasTransparentShadowCasters
+	            Float      giSuppressAwayFromLightThresh
 #if NT_ENABLE_PROCEDURAL
-		        ,
-		        BindlessVar proc_bindless
+	                ,
+	                BindlessVar proc_bindless
 		    #endif
+#if NT_ENABLE_SHARC
+	                ,
+	                BufferVar<SharcParams> sharc_params,
+	                BufferVar<SharcKeyHost> sharc_entries,
+	                BufferVar<render::SharcPackedData> sharc_resolved,
+	                BufferVar<luisa::uint> sharc_query_stats
+	    #endif
 	            ) noexcept {
 	            set_name("GI_Initial");
 	            set_block_size(16u, 16u, 1u);
 	            auto p = params.read(0u);
 
+	            // Compile-time-specialized flags (former UInt args 17/18/21 +
+	            // sharcQueryOn; baked by compileImpl — see the snapshot block
+	            // there). C++ consts so the DSL embeds literals and DXC folds
+	            // the dead branch away; sharcQueryOn stays a DSL const because
+	            // it is forwarded as a callable argument.
+	            const uint oneBounce = _bakedOneBounce;                    // 1=skip 2nd bounce
+	            const uint giScale = _bakedGiScale;                        // 1=full, 2=half-res
+	            const uint hasTransparentShadowCasters = _bakedTransparentShadowCasters; // 0=any-hit fast path
+#if NT_ENABLE_SHARC
+	            const UInt sharcQueryOn = _bakedSharcQueryOn;              // 1=query at x2
+#endif
+
+#if NT_ENABLE_SHARC
+	            // SHARC query bindings (plan §7 Phase 2). Grid params come
+	            // from the same staging buffer as Update/Resolve — mismatched
+	            // params would compute keys that never hit. Read-only view:
+	            // the query never touches accumulation or locks. Captured by
+	            // gi_bounce alongside the other scene resources.
+	            auto sharc_p = sharc_params.read(0u);
+	            SharcGridParams sharc_grid{camera->position, kSharcGridLogarithmBase,
+	                                       sharc_p.sceneScale, sharc_p.levelBias};
+	            // X2-lobe floor for the query gate: mirrors the update path's
+	            // roughnessMin — records below it were written with a floored
+	            // lobe, and without SH encoding they are only direction-valid
+	            // for near-diffuse x2 anyway.
+	            Float sharc_query_x2_roughness_min = sharc_p.roughnessMin;
+	            SharcQueryCache<SharcEngineLayout> sharc_cache{
+	                std::move(sharc_entries), std::move(sharc_resolved), sharc_p.capacity};
+#endif
+
 	            // GI bounce callable: trace ray -> reconstruct hit -> NEE
 	            // Captures all scene/light resources from enclosing kernel scope.
-	            Callable gi_bounce = [&](Float3 origin, Float3 dir, Float3 wo, UInt seed, UInt receiver_inst) noexcept {
+	            // query_launch_roughness / query_allowed drive the Phase-2 SHARC
+	            // query: the x2 hit (first GI segment only) may terminate on the
+	            // cache instead of running NEE. The caller reads result.cache_status
+	            // (tri-state: 0 none / 1 hit / 2 attempted-miss) to skip the x2->x3
+	            // trace on hit and to feed the SHARC panel's hit-rate counters.
+#if NT_ENABLE_SHARC
+            Callable gi_bounce = [&](Float3 origin, Float3 dir, Float3 wo, UInt seed,
+                                     Bool receiver_is_proc, UInt receiver_id,
+                                     Float query_launch_roughness, UInt query_allowed) noexcept {
+#else
+            Callable gi_bounce = [&](Float3 origin, Float3 dir, Float3 wo, UInt seed,
+                                     Bool receiver_is_proc, UInt receiver_id) noexcept {
+#endif
 	                Var<GIBounceResult> result;
 	                result.px = 0.0f; result.py = 0.0f; result.pz = 0.0f;
 	                result.nx = 0.0f; result.ny = 0.0f; result.nz = 0.0f;
@@ -84,6 +170,7 @@ namespace newtype::core {
 	                result.hit_bary_u = 0.0f; result.hit_bary_v = 0.0f;
 	                result.hit_t = 0.0f;
 	                result.seed = seed;
+	                result.cache_status = 0u;
 	                result.valid = 0u;
 
 	                auto ray = make_ray(origin, dir, 0.001f, 1e10f);
@@ -93,11 +180,27 @@ namespace newtype::core {
 #endif
 	                );
 
-	                // Reject self-instance hits (BRDF ray hitting adjacent face of same mesh).
-// Without this, a closed mesh picks up illumination from its own bright side
-// via grazing-angle BRDF rays that self-hit at short distance, producing the
-// "GI leak" pattern that matches the mesh's own illuminated regions.
-$if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
+                    // Reject self-object hits (BRDF ray hitting an adjacent
+                    // face of the same object). Without this, a closed mesh
+// picks up illumination from its own bright side via grazing-angle BRDF
+// rays that self-hit at short distance, producing the "GI leak" pattern
+// that matches the mesh's own illuminated regions.
+// Index spaces (see trace_closest): every procedural AABB shares ONE TLAS
+// instance, so procedural identity is the AABB index (hit.prim) while mesh
+// identity is the TLAS instance index (hit.inst). The receiver id lives in
+// its own space (G-buffer inst_id = AABB index for procedural receivers,
+// TLAS index for mesh receivers) — compare only within the matching space.
+// A cross-space comparison makes procedural self-hits always pass (bounce-1)
+// and rejects hits on EVERY procedural object (bounce-2 from procedural x2).
+#if NT_ENABLE_PROCEDURAL
+Bool self_hit = ite(hit.is_procedural,
+    receiver_is_proc & Expr{ hit.prim == receiver_id },
+    !receiver_is_proc & Expr{ hit.inst == receiver_id });
+$if(!hit->miss() & !self_hit) {
+#else
+// Mesh-only build: single index space — receiver_id is the TLAS instance.
+$if(!hit->miss() & Expr{ hit.inst != receiver_id }) {
+#endif
 	                    UInt hit_inst = hit.inst;
 	                    UInt hit_prim = hit.prim;        // mesh: triangle idx; proc: AABB idx (= resolver inst_id)
 	                    Float hit_t = hit.committed_ray_t;
@@ -176,7 +279,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            hit_inst_data, hit_prim, hit_bary,
 	                            scene.material_buffer, wo,
 	                            scene.instance_transform_buffer.read(hit_inst),
-	                            0.0f, make_float2(0.0f), 0u, 0u);
+	                            0.0f, make_float2(0.0f), 0u, 0u, hit_inst);
 #if NT_ENABLE_PROCEDURAL
 	                    };
 #endif
@@ -189,6 +292,18 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    Float3 x2_conductor_eta = x2_surface.attenuation;
 	                    Float3 x2_conductor_k   = x2_surface.conductor_k;
 
+	                    // Emissive-x2 exclusion (DI/GI double-count guard — see
+	                    // docs/gi_temporal_dynamic_receiver_plan.md addendum):
+	                    // this pipeline sums DI and GI with no RTXDI FinalShading
+	                    // MIS between them, so a GI reservoir sampling the emitter
+	                    // counts the direct path twice. With the SHARC query the
+	                    // cached emission (~emission magnitude) also dominates
+	                    // p_hat and hijacks reservoir accumulation (the xform
+	                    // highlight flip). DI owns emitter visibility — an
+	                    // emissive x2 is never selected; the receiver falls
+	                    // through to bounce samples / history fill.
+	                    Bool   x2_emissive   = x2_mat_type == 5u;
+
 	                    // NEE: multi-candidate RIS at x2 (ReSTIR-GI Gap #3 fix).
 	                    // Stream kGiInitialCandidateCount triangle candidates + kGiInitialEnvCandidateCount env
 	                    // candidates. Each evaluates an unshadowed MC estimate; RIS picks a winner. Only the
@@ -197,9 +312,60 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    //   radiance = (w_sum / M) * (MC_sel / p_hat_sel) * visibility
 	                    // which lowers variance ~1/M on low-roughness metal GI without adding bias.
 	                    Float3 radiance = def(make_float3(0.0f));
+#if NT_ENABLE_SHARC
+	                    // Phase-2 query latches: visible at the result fill below.
+	                    // sharc_queried distinguishes "attempted and missed" (2)
+	                    // from "never attempted" (0) for the hit-rate counters.
+	                    Bool sharc_hit = def(false);
+	                    Bool sharc_queried = def(false);
+#endif
 	                    $if(Expr{ mat.type == 12u } &mat.meta < 0.5f) {
 	                        radiance = x2_albedo;
 	                    } $else {
+#if NT_ENABLE_SHARC
+	                        // ======== SHARC query (plan §7 Phase 2) ========
+	                        // An eligible x2 terminates on the cache instead of
+	                        // running NEE (+ the caller skips the x2->x3 trace —
+	                        // the cached value already carries the converged
+	                        // multi-bounce tail). Gates: segment length and x1
+	                        // lobe footprint vs the x2 voxel (sharc_query_eligible),
+	                        // x2 not delta (glass x2 zeroes NEE today and the cache
+	                        // stores no delta transport), x2 not emissive (the
+	                        // cached emission would re-enter GI as a double-counted
+	                        // direct path and dominate p_hat), x2 not unlit (exact
+	                        // emission beats the cached estimate — handled by the
+	                        // outer unlit branch), x2 lobe diffuse-enough
+	                        // (roughness at/above the update-path floor and not
+	                        // a conductor — without SH encoding a record is a
+	                        // direction-averaged value, so a glossy/metal x2
+	                        // would receive highlight-bleeding radiance: the
+	                        // xform gold-record channel, moon top-half),
+	                        // not procedural (the update path
+	                        // inserts no proc entries). Query miss => existing
+	                        // NEE path runs untouched.
+	                        $if(query_allowed != 0u) {
+                            Bool sharc_proc_ok = def(true);
+#if NT_ENABLE_PROCEDURAL
+                            sharc_proc_ok = !hit_is_proc;
+#endif
+                            UInt x2_level = sharc_get_level<SharcEngineLayout>(
+                                x2_surface.position, sharc_grid);
+                            Bool sharc_eligible = sharc_query_eligible(
+                                hit_t, query_launch_roughness, x2_level, sharc_grid)
+                                & (x2_mat_type != 3u) & (!x2_emissive) & sharc_proc_ok
+                                & (x2_roughness >= sharc_query_x2_roughness_min)
+                                & (x2_metallic < 0.5f);
+                            $if(sharc_eligible) {
+                                Float3 sharc_cached = def(make_float3(0.0f));
+                                sharc_queried = def(true);
+                                sharc_hit = sharc_get_cached_radiance(
+                                    sharc_cache, sharc_grid, x2_surface.position,
+                                    x2_surface.ns, sharc_cached);
+                                $if(sharc_hit) { radiance = sharc_cached; };
+                            };
+                        };
+                        $if(!sharc_hit) {
+#endif
 	                        // RIS state (inner to this bounce; not propagated to the GI reservoir)
 	                        Float ris_w_sum   = def(0.0f);
 	                        UInt  ris_M       = def(0u);
@@ -215,22 +381,20 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
                         // external (x2_mat_type at the call sites) because the
                         // const& overloads gate on the pinned bsdf_type instead.
                         // Built once per bounce instead of once per candidate.
-                        MaterialBSDF x2_nee_bsdf{
+                        MaterialBSDF x2_nee_bsdf = make_material_bsdf(
                             x2_albedo, x2_roughness, x2_metallic, x2_ior,
                             0.f, 0.f,
                             0.f, 0.5f,
                             0.f, 1.3f, 0.f,
                             0.f, 0.f,
                             luisa::compute::make_float3(1.f, 0.f, 0.f), 1.f,
-                            0u, 0.f, 0.f, 0.f, 0.f,
-                            x2_conductor_eta, 0.f, 1.f,
-                            x2_conductor_k};
-                        x2_nee_bsdf.build_lobe_list();
-                        // Same normal the const& evaluate overloads receive below.
-                        x2_nee_bsdf.precompute_tangent_rotation(ns);
+                            x2_conductor_eta, x2_conductor_k,
+                            ns);
 	                    
 	                        // ======== Triangle candidates (alias-table power-weighted) ========
-	                        $if(lights.emissive_count > 0u) {
+	                        // Streams closed for emissive x2: radiance stays 0 => p_hat 0
+	                        // => the sample is never selected at x1 (no shadow ray either).
+	                        $if(lights.emissive_count > 0u & !x2_emissive) {
 	                            $for(c, kGiInitialCandidateCount) {
 	                                UInt cseed = util::xxhash32(make_uint2(seed, c * 2654435761u + 1u));
 	                                Float u_select = util::uniform_uint_to_float(cseed);
@@ -296,7 +460,8 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                        };
 	                    
 	                        // ======== Env candidates (from PassDI presampled env tiles) ========
-	                        $if(Expr{ env.env_integral > 0.0f } & Expr{ presample_env_total_entries > 0u }) {
+	                        $if(Expr{ env.env_integral > 0.0f } & Expr{ presample_env_total_entries > 0u }
+	                            & !x2_emissive) {
 	                            $for(ec, kGiInitialEnvCandidateCount) {
 	                                UInt eseed = util::xxhash32(make_uint3(seed, ec + 0xabcdefu, 0x1234u));
 	                                UInt entry_idx = eseed % presample_env_total_entries;
@@ -340,34 +505,55 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
                                         pos + ns * s_offset + sel_dir * (0.25f * s_offset),
                                         sel_dir, s_offset, shadow_tmax);
 	                            Bool visible = def(true);
-	                            $if(hasTransparentShadowCasters == 0u) {
+	                            if (hasTransparentShadowCasters == 0u) {
 	                                // Opaque scene: any-hit occlusion is exact and skips the
 	                                // closest-hit traversal + blocker material resolve below.
 	                                visible = !render::trace_occluded(accel, shadow_ray
-	                    #if NT_ENABLE_PROCEDURAL
+                    #if NT_ENABLE_PROCEDURAL
 	                                    , proc_bindless
-	                    #endif
+                    #endif
 	                                );
-	                            } $else {
+	                            } else {
 	                                auto shadow_hit = render::trace_closest(accel, shadow_ray
-	                    #if NT_ENABLE_PROCEDURAL
+                    #if NT_ENABLE_PROCEDURAL
 	                                    , proc_bindless
-	                    #endif
+                    #endif
 	                                );
 	                                visible = shadow_hit->miss();
 	                                $if(!visible) {
-	                                    UInt4 s_inst_data = scene.instance_buffer.read(shadow_hit.inst);
-	                                    Var<MaterialData> s_mat = scene.material_buffer.read(Expr{ s_inst_data.y & 0xFFu });
-	                                    visible = (s_mat.type == 5u) |
-	                                        is_alpha_cutout(s_mat, vertex_bindless, tex_bindless, s_inst_data, shadow_hit.prim, shadow_hit.bary);
+#if NT_ENABLE_PROCEDURAL
+	                                    // Procedural blocker: inst is the shared proc TLAS
+	                                    // slot (out of range for instance_buffer) —
+	                                    // classify via the AABB's own material layers.
+	                                    // Emissive passes; no alpha-cutout on procedural.
+	                                    $if(shadow_hit.is_procedural) {
+	                                        Var<scene::ProcInstanceData> s_proc = proc_bindless
+	                                            .buffer<scene::ProcInstanceData>(render::kSlot_ProcInstances)
+	                                            .read(shadow_hit.prim);
+	                                        Var<MaterialData> s_mat = scene.material_buffer.read(
+	                                            Expr{ s_proc.material_layers & 0xFFu });
+	                                        visible = (s_mat.type == 5u);
+	                                    } $else {
+#endif
+	                                        UInt4 s_inst_data = scene.instance_buffer.read(shadow_hit.inst);
+	                                        Var<MaterialData> s_mat = scene.material_buffer.read(Expr{ s_inst_data.y & 0xFFu });
+	                                        visible = (s_mat.type == 5u) |
+	                                            is_alpha_cutout(s_mat, vertex_bindless, tex_bindless, s_inst_data, shadow_hit.prim, shadow_hit.bary);
+#if NT_ENABLE_PROCEDURAL
+	                                    };
+#endif
 	                                };
-	                            };
+	                            }
 	                            $if(visible) {
 	                                Float3 rad_x2 = (ris_w_sum / cast<Float>(ris_M)) * (sel_MC / max(sel_p_hat, 1e-8f));
 	                                radiance = rad_x2;
 	                            };
 	                        };
 	                    
+#if NT_ENABLE_SHARC
+	                        }; // !sharc_hit — NEE ran only on query miss/off
+#endif
+
 	                        // Advance seed so the next call (second bounce) gets decorrelated randomness.
 	                        // Per-call LCG step; per-candidate decorrelation is handled via xxhash32 above.
 	                        seed = util::lcg_ui(seed);
@@ -377,6 +563,9 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    result.tx = tangent.x; result.ty = tangent.y; result.tz = tangent.z;
 	                    result.tw = tangent_w;
 	                    result.rad_x = radiance.x; result.rad_y = radiance.y; result.rad_z = radiance.z;
+#if NT_ENABLE_SHARC
+	                    result.cache_status = ite(sharc_queried, ite(sharc_hit, 1u, 2u), 0u);
+#endif
 	                    result.hit_inst = hit_inst;
 	                    result.hit_inst_data_y = hit_material_layers;
 	                    result.hit_prim = hit_prim;
@@ -403,16 +592,16 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            if (_checkerboard) {
 	                // When half-res (giScale > 1), initial pass runs at native half-res
 	                // without checkerboard conversion - the upsample handles checkerboard mapping
-	                $if(giScale > 1u) {
+	                if (giScale > 1u) {
 	                    coord = rsv;
 	                    resolution = rsv_res;
 	                    pixel_index = rsv.y * rsv_res.x + rsv.x;
-	                } $else {
+	                } else {
 	                    coord = make_uint2(rsv.x << 1u, rsv.y);
 	                    coord.x = coord.x + ((coord.y + cbField) & 1u);
 	                    resolution = make_uint2(rsv_res.x * 2u, rsv_res.y);
 	                    pixel_index = rsv.y * rsv_res.x + rsv.x;
-	                };
+	                }
 	                $if(rsv.x >= rsv_res.x | rsv.y >= rsv_res.y) { $return(); };
 	            } else {
 	                coord = rsv;
@@ -459,7 +648,25 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                // (from PSR's stored inst/prim/bary) instead of the virtual depth
 	                // projection onto the camera ray -- avoids BRDF rays originating
 	                // from a displaced position that can hit the glass sphere.
-	                UInt4 inst_data = scene.instance_buffer.read(inst_id);
+	                // Receiver material layers. Procedural receivers index the
+	                // proc instance buffer instead (inst_id is an AABB index
+	                // there — out of range for the mesh instance buffer, so the
+	                // unconditional read returned garbage that gated `material`
+	                // below on an unrelated mesh's data).
+	                UInt4 inst_data = def(make_uint4(0u));
+	                UInt receiver_material_layers = def(0u);
+#if NT_ENABLE_PROCEDURAL
+	                $if(is_procedural_gi) {
+	                    receiver_material_layers = proc_bindless
+	                        .buffer<scene::ProcInstanceData>(render::kSlot_ProcInstances)
+	                        .read(inst_id).material_layers;
+	                } $else {
+#endif
+	                    inst_data = scene.instance_buffer.read(inst_id);
+	                    receiver_material_layers = inst_data.y;
+#if NT_ENABLE_PROCEDURAL
+	                };
+#endif
 	                Float3 wo = -normalize(ray->direction());
 
 	                // Resolve surface: procedural builds from material directly,
@@ -491,18 +698,26 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    inst_data, prim_id, bary,
 	                    scene.material_buffer, wo,
 	                    scene.instance_transform_buffer.read(inst_id),
-	                    0.0f, screen_uv, resolution.x, resolution.y);
+	                    0.0f, screen_uv, resolution.x, resolution.y, inst_id);
 #if NT_ENABLE_PROCEDURAL
-	                };
+                };
 #endif
 
-	                // For glass PSR: use actual background surface position.
-	                // The ray-based position lands on the camera ray at virtual depth, which is inside
-	                // the glass sphere -- GI bounces would start inside the glass.
-	                // (surface.position is already world-space after resolve_surface_from_instance.)
-	                Float3 world_pos = ite(is_glass,
-	                    surface.position,
-	                    ray->origin() + ray->direction() * depth);
+                // Blend-rolled-opaque reclass (see Shading.h) — GI initial must
+                // trace BRDF rays for the diffuse side, not skip as delta glass.
+                // world_pos follows the shade's convention: the resolved position
+                // (the stored depth is unjittered-classification-ray depth).
+                Bool gi_blend_rolled = ((surface.bsdf_type == 3u) |
+                                        (surface.bsdf_type == 11u)) & !is_glass;
+                reclass_blend_rolled_opaque(surface, is_glass);
+
+                // For glass PSR: use actual background surface position.
+                // The ray-based position lands on the camera ray at virtual depth, which is inside
+                // the glass sphere -- GI bounces would start inside the glass.
+                // (surface.position is already world-space after resolve_surface_from_instance.)
+                Float3 world_pos = ite(is_glass | gi_blend_rolled,
+                    surface.position,
+                    ray->origin() + ray->direction() * depth);
 
 	                // DEBUG leak test: optionally skip GI on surfaces facing away from first light.
 	                // Used to test if cabinet-back-face-like surfaces (dark, no direct light) are
@@ -525,7 +740,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                // Glass pixels: RIS-combine multiple initial samples (P4).
 	                // Non-glass: single sample (no extra cost).
 	                // Unlit+GI (meta>=0.5) participates as Lambertian diffuse.
-	                auto material = scene.material_buffer.read(Expr{ inst_data.y & 0xFFu });
+		                auto material = scene.material_buffer.read(Expr{ receiver_material_layers & 0xFFu });
 	                $if(surface.bsdf_type != 3u
 	                    & !(surface.bsdf_type == 12u & material.meta < 0.5f)
                     & !skip_gi_debug) {
@@ -536,6 +751,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    Float3 sel_nrm = def(make_float3(0.0f));
 	                    Float3 sel_rad = def(make_float3(0.0f));
 	                    Float  sel_target_pdf = def(0.0f);
+                    Bool   sel_cache_hit = def(false);
 	                    UInt base_seed = seed_image.read(gbuf_coord).x;
 
 	                    // Runtime bound (sample_count: 1 for opaque,
@@ -558,8 +774,28 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                        Float3 wi = bsdf_mis.sample(wo, surface.ns, u_brdf, brdf_pdf);
 
 	                        $if(brdf_pdf > 1e-6f & Expr{ dot(wi, surface.ns) } > 1e-4f) {
-	                            Float offset = max(0.001f * depth, 1e-4f);
-	                            auto bounce1 = gi_bounce(world_pos + surface.ns * offset, wi, -wi, seed, inst_id);
+                                    Float offset = max(0.001f * depth, 1e-4f);
+                                    // Self-rejection receiver identity: procedural
+                                    // receivers identify by AABB index (inst_id),
+                                    // mesh receivers by TLAS instance index.
+                                    auto bounce1 = gi_bounce(world_pos + surface.ns * offset, wi, -wi, seed,
+                                        is_procedural_gi, inst_id
+#if NT_ENABLE_SHARC
+                                        , surface.roughness, sharcQueryOn
+#endif
+                                    );
+#if NT_ENABLE_SHARC
+                                    // Query diagnostics (SHARC panel hit rate): one
+                                    // atomic per attempted lookup. Status 0 (query
+                                    // off / gates rejected / invalid hit) skips the
+                                    // atomics entirely, so the query-off A/B path
+                                    // measures nothing but the query itself.
+                                    $if(bounce1.cache_status == 1u) {
+                                        sharc_query_stats.atomic(0u).fetch_add(1u);
+                                    } $elif(bounce1.cache_status == 2u) {
+                                        sharc_query_stats.atomic(1u).fetch_add(1u);
+                                    };
+#endif
 
 	                            $if((bounce1.valid & 1u) != 0u) {
 	                                Float3 x2_pos = bounce1->pos();
@@ -570,9 +806,23 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                Var<MaterialData> x2_material = scene.material_buffer.read(Expr{ bounce1.hit_inst_data_y & 0xFFu });
 	                                Bool x2_is_unlit = x2_material.type == 12u;
 
-	                                // ======== Second bounce: x2 -> x3 ========
-	                                $if(oneBounce == 0u) {
-	                                    $if(x2_material.type != 3u & !(x2_is_unlit & x2_material.meta < 0.5f)) {
+                                // ======== Second bounce: x2 -> x3 ========
+                                // Skipped when x2 terminated on the SHARC cache
+                                // (Phase 2): the cached radiance already includes
+                                // the converged higher-order bounces. Also skipped
+                                // for emissive x2 (double-count guard above — no
+                                // bounce off the emitter's degenerate BSDF).
+                                if (oneBounce == 0u) {
+                                    // ($if is a macro — the flag guard must wrap
+                                    // whole statements, not sit in the condition.)
+#if NT_ENABLE_SHARC
+                                    $if(x2_material.type != 3u & !(x2_is_unlit & x2_material.meta < 0.5f)
+                                        & (x2_material.type != 5u)
+                                        & (bounce1.cache_status != 1u)) {
+#else
+                                    $if(x2_material.type != 3u & !(x2_is_unlit & x2_material.meta < 0.5f)
+                                        & (x2_material.type != 5u)) {
+#endif
 	                                        UInt seed2 = util::xxhash32(make_uint3(bounce1.seed, coord.x + 7919u, coord.y + sample_idx * 53u));
 	                                        UInt coord_hash2 = util::xxhash32(make_uint2(coord.x + 7919u, coord.y + sample_idx * 53u));
 	                                        auto pcg2 = util::pcg2d(make_uint2(seed2, coord_hash2));
@@ -601,7 +851,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                                make_float2(bounce1.hit_bary_u, bounce1.hit_bary_v),
 	                                                scene.material_buffer, -wi,
 	                                                scene.instance_transform_buffer.read(bounce1.hit_inst),
-	                                                0.0f, make_float2(0.0f), 0u, 0u);
+	                                                0.0f, make_float2(0.0f), 0u, 0u, bounce1.hit_inst);
 #if NT_ENABLE_PROCEDURAL
 	                                        };
 #endif
@@ -611,8 +861,18 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                        Float3 wi_x2 = bsdf_x2.sample(x2_wo, x2_ns, u_brdf2, brdf_pdf_x2);
 	                                        Float cos_wi_x2 = dot(wi_x2, x2_ns);
 	                                        $if(brdf_pdf_x2 > 1e-6f & Expr{ cos_wi_x2 } > 1e-4f) {
-	                                            Float x2_off = max(0.001f * bounce1.hit_t, 1e-4f);
-	                                            auto bounce2 = gi_bounce(x2_pos + x2_ns * x2_off, wi_x2, -wi_x2, bounce1.seed, bounce1.hit_inst);
+                                            Float x2_off = max(0.001f * bounce1.hit_t, 1e-4f);
+                                            // x2 receiver identity in its own index space:
+                                            // AABB index for procedural x2, TLAS index for mesh x2.
+                                            auto bounce2 = gi_bounce(x2_pos + x2_ns * x2_off, wi_x2, -wi_x2, bounce1.seed,
+                                                bounce1->is_procedural(),
+                                                ite(bounce1->is_procedural(), bounce1.hit_prim, bounce1.hit_inst)
+#if NT_ENABLE_SHARC
+                                                // No cache query at x3 (Phase-2 scope: the x2 hook
+                                                // already carries the multi-bounce tail on hit).
+                                                , x2_surface_b2.roughness, 0u
+#endif
+                                            );
 	                                            $if((bounce2.valid & 1u) != 0u) {
 	                                                Float3 x3_radiance = bounce2->rad();
 	                                                Float cos_x2 = luisa::compute::max(0.0f, cos_wi_x2);
@@ -641,14 +901,21 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                Float w = p_hat / brdf_pdf;
 	                                ris_w_sum = ris_w_sum + w;
 	                                ris_M = ris_M + 1u;
-	                                UInt ris_seed = util::xxhash32(make_uint3(pixel_index, base_seed, sample_idx));
-	                                Float ris_u = util::uniform_uint_to_float(ris_seed);
-	                                $if(ris_u * ris_w_sum < w) {
-	                                    sel_pos = x2_pos;
-	                                    sel_nrm = x2_ns;
-	                                    sel_rad = x2_radiance;
-	                                    sel_target_pdf = p_hat;
-	                                };
+                                        UInt ris_seed = util::xxhash32(make_uint3(pixel_index, base_seed, sample_idx));
+                                        Float ris_u = util::uniform_uint_to_float(ris_seed);
+                                        // RTXDI_StreamSampleAndAccumulateWeight seeds the
+                                        // reservoir with the first candidate unconditionally,
+                                        // so M>0 always implies a selected sample even when
+                                        // every w is zero (grazing/backfacing candidates).
+                                        $if((ris_M == 1u) | (ris_u * ris_w_sum < w)) {
+                                            sel_pos = x2_pos;
+                                            sel_nrm = x2_ns;
+                                            sel_rad = x2_radiance;
+                                            sel_target_pdf = p_hat;
+#if NT_ENABLE_SHARC
+                                            sel_cache_hit = bounce1.cache_status == 1u;
+#endif
+                                };
 	                            };
 	                        };
 
@@ -662,7 +929,12 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
                     // samples get visibility=1, vis_age=0; the shade pass
                     // can skip the shadow trace when motion is below
                     // threshold (RTXDI-style reuse).
-	                    $if(ris_M > 0u & sel_target_pdf > 1e-8f) {
+	                    // RTXDI parity: reservoir validity is M != 0 (GI/Reservoir.hlsli
+	                    // RTXDI_IsValidGIReservoir). Do NOT invalidate on tiny target_pdf —
+	                    // grazing-angle/backfacing candidates then zero whole pixel
+	                    // neighborhoods (hard invalid boundary in viz mode 9) instead of
+	                    // staying valid with weight_sum = 0. init_denom clamps the divide.
+	                    $if(ris_M > 0u) {
 	                        Float3 gi_to_sample = sel_pos - world_pos;
 	                        Float  gi_dist      = luisa::compute::length(gi_to_sample);
 	                        Float3 gi_dir       = gi_to_sample * (1.0f / max(gi_dist, 1e-6f));
@@ -671,7 +943,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
                                         world_pos + surface.ns * gi_off + gi_dir * (0.25f * gi_off),
 		                                gi_dir, gi_off, gi_dist - gi_off);
 	                        Bool gi_vis = def(true);
-	                        $if(hasTransparentShadowCasters == 0u) {
+	                        if (hasTransparentShadowCasters == 0u) {
 	                            // Opaque scene: any-hit occlusion is exact and skips the
 	                            // closest-hit traversal + blocker material resolve below.
 	                            gi_vis = !render::trace_occluded(accel, gi_shadow
@@ -679,23 +951,45 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                , proc_bindless
 #endif
 	                            );
-	                        } $else {
+	                        } else {
 	                            auto   gi_sh_hit    = render::trace_closest(accel, gi_shadow
 #if NT_ENABLE_PROCEDURAL
 	                                , proc_bindless
 #endif
 	                            );
 	                            $if(!gi_sh_hit->miss()) {
+#if NT_ENABLE_PROCEDURAL
+	                                // Procedural blocker: inst is the shared proc TLAS
+	                                // slot (out of range for instance_buffer) —
+	                                // classify via the AABB's own material layers.
+	                                // Emissive passes; no alpha-cutout on procedural.
+	                                $if(gi_sh_hit.is_procedural) {
+	                                    Var<scene::ProcInstanceData> gs_proc = proc_bindless
+	                                        .buffer<scene::ProcInstanceData>(render::kSlot_ProcInstances)
+	                                        .read(gi_sh_hit.prim);
+	                                    Var<MaterialData> gs_mat = scene.material_buffer.read(
+	                                        Expr{ gs_proc.material_layers & 0xFFu });
+	                                    gi_vis = (get_effective_bsdf_type(gs_mat) == 5u);
+	                                } $else {
+#endif
 	                                UInt4  gs_inst_data = scene.instance_buffer.read(gi_sh_hit.inst);
 	                                Var<MaterialData> gs_mat = scene.material_buffer.read(
 	                                    Expr{ gs_inst_data.y & 0xFFu });
-	                                Bool gs_tp = (gs_mat.type == 3u | gs_mat.type == 5u | gs_mat.type == 11u);
+	                                // Effective type: custom blendable callables with
+	                                // bsdf_type_override=3 must classify as glass here,
+	                                // matching the shade shadow walk (existing
+	                                // inconsistency — raw type made them occluders).
+	                                UInt gs_eff = get_effective_bsdf_type(gs_mat);
+	                                Bool gs_tp = (gs_eff == 3u | gs_eff == 5u | gs_eff == 11u);
 	                                Bool gs_cutout = is_alpha_cutout(
 	                                    gs_mat, vertex_bindless, tex_bindless,
 	                                    gs_inst_data, gi_sh_hit.prim, gi_sh_hit.bary);
 	                                gi_vis = gs_tp | gs_cutout;
+#if NT_ENABLE_PROCEDURAL
+	                                };
+#endif
 	                            };
-	                        };
+	                        }
 	
 	                        $if(gi_vis) {
 	                            gi_r.px = sel_pos.x; gi_r.py = sel_pos.y; gi_r.pz = sel_pos.z;
@@ -708,10 +1002,13 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            Float init_denom = cast<Float>(ris_M) * max(sel_target_pdf, 1e-6f);
 	                            gi_r.weight_sum = min(ris_w_sum / init_denom, _giWSumCap);
 	                            gi_r.target_pdf = sel_target_pdf;
-	                            gi_r->set_M(ris_M);
-	                            gi_r->set_age(0u);
-	                            gi_r->set_visibility(1u);
-	                            gi_r->set_vis_age(0u);
+                            gi_r->set_M(ris_M);
+                            gi_r->set_age(0u);
+                            gi_r->set_visibility(1u);
+                            gi_r->set_vis_age(0u);
+                            // SHARC estimator-domain tag: reuse passes exclude
+                            // cache-sourced reservoirs (plan §9.2).
+                            gi_r->set_cache_hit(ite(sel_cache_hit, 1u, 0u));
 	                            gi_r->set_roughness(cast<UInt>(luisa::compute::saturate(surface.roughness) * 63.0f + 0.5f));
 	                        };
 	                    };
@@ -796,16 +1093,21 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            ImageFloat gbuf_depth_prev,
 	            ImageUInt  gbuf_vis_prev,
 	            ImageFloat denoise_normal_prev,
-	            UInt       tier3BiasCorrectionEnabled,
-	            UInt       giScale
+	            UInt       tier3BiasCorrectionEnabled
 #if NT_ENABLE_PROCEDURAL
 		        ,
 		        BindlessVar proc_bindless
 		    #endif
 	            ) noexcept {
-	            set_name("GI_Temporal");
-	            set_block_size(16u, 16u, 1u);
-	            auto p = params.read(0u);
+            set_name("GI_Temporal");
+            set_block_size(16u, 16u, 1u);
+            auto p = params.read(0u);
+
+            // Compile-time-specialized giScale (former UInt arg 16; baked
+            // by compileImpl — flips recompile via refreshSpecialization).
+            const uint  giScale   = _bakedGiScale;
+            const float invGiScale = 1.0f / static_cast<float>(giScale);
+            const int   giScaleI  = static_cast<int>(giScale);
 	            UInt2 rsv       = dispatch_id().xy();
 	            UInt2 rsv_res   = dispatch_size().xy();
 	            UInt2 coord;
@@ -814,16 +1116,16 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            if (_checkerboard) {
 	                // Half-res mode (giScale > 1): dispatch is the native half-res
 	                // grid with dense packing (no checkerboard), matching initial.
-	                $if(giScale > 1u) {
+	                if (giScale > 1u) {
 	                    coord = rsv;
 	                    resolution = rsv_res;
 	                    pixel_index = rsv.y * rsv_res.x + rsv.x;
-	                } $else {
+	                } else {
 	                    coord = make_uint2(rsv.x << 1u, rsv.y);
 	                    coord.x = coord.x + ((coord.y + cbField) & 1u);
 	                    resolution = make_uint2(rsv_res.x * 2u, rsv_res.y);
 	                    pixel_index = rsv.y * rsv_res.x + rsv.x;
-	                };
+	                }
 	                $if(rsv.x >= rsv_res.x | rsv.y >= rsv_res.y) { $return(); };
 	            } else {
 	                coord = rsv;
@@ -847,12 +1149,19 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            Bool   is_point_gi = ((cur_vis.y >> 30u) & 1u) > 0u;
 	            Bool   is_procedural_gi_tp = ((cur_vis.y >> 29u) & 1u) > 0u;
 
-	            // Skip temporal reuse for glass pixels -- glass GI accumulates
-	            // incorrectly through temporal/spatial reuse (RTXDI-PT uses a dedicated
-	            // GlassPass instead). GI initial provides 1 fresh sample/frame for glass.
-	            // Skip point/procedural pixels -- no bindless vertex data.
-	            $if(cur_inst != ~0u & !cur_is_glass & !is_point_gi) {
-	                Var<GIReservoir> current = gi_reservoir_buffer.read(pixel_index);
+            // Skip temporal reuse for glass pixels -- glass GI accumulates
+            // incorrectly through temporal/spatial reuse (RTXDI-PT uses a dedicated
+            // GlassPass instead). GI initial provides 1 fresh sample/frame for glass.
+            // Skip point/procedural pixels -- no bindless vertex data.
+            // SHARC cache-hit reservoirs skip too (same pattern): their radiance
+            // is the converged cache estimate, and merging it with the NEE stream
+            // inflates W by the fresh-vs-winner p_hat ratio every merge
+            // (docs/gi_temporal_dynamic_receiver_plan.md §9.2). The initial
+            // reservoir stays in this in-place buffer untouched.
+            Var<GIReservoir> current_early = gi_reservoir_buffer.read(pixel_index);
+            $if(cur_inst != ~0u & !cur_is_glass & !is_point_gi
+                & (current_early->cache_hit() == 0u)) {
+                Var<GIReservoir> current = current_early;
 	                // Initialize streaming accumulator via cross-form identity:
 	                // weight_sum_post_finalize * M * target_pdf = raw_input.
 	                // Matches RTXDI CombineGIReservoirs on empty accumulator with input
@@ -869,11 +1178,29 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                UInt   cur_prim_id = cur_vis.y & 0x3FFFFFFFu;
 	                Float4 bary_motion_t = gbuf_bary_motion.read(gbuf_coord);
 	                Float2 cur_bary = bary_motion_t.xy();
-	                UInt4 inst_data = scene.instance_buffer.read(cur_inst);
+	                // Receiver material layers: procedural receivers index the proc
+	                // instance buffer (cur_inst is an AABB index — out of range for
+	                // the mesh instance buffer). Layers feed the temporal similarity
+	                // key below; the mesh fields (.z/.w) are read only in the mesh
+	                // branch of the depth-reference block.
+	                UInt4 inst_data = def(make_uint4(0u));
+	                UInt receiver_layers_tp = def(0u);
+#if NT_ENABLE_PROCEDURAL
+	                $if(is_procedural_gi_tp) {
+	                    receiver_layers_tp = proc_bindless
+	                        .buffer<scene::ProcInstanceData>(render::kSlot_ProcInstances)
+	                        .read(cur_inst).material_layers;
+	                } $else {
+#endif
+	                    inst_data = scene.instance_buffer.read(cur_inst);
+	                    receiver_layers_tp = inst_data.y;
+#if NT_ENABLE_PROCEDURAL
+	                };
+#endif
 	                // Gap D: hoist current pixel similarity key once per pixel for
 	                // cross-instance material-similarity lookup. Consumed when a
 	                // temporal candidate has a different instance (rare: disocclusions).
-	                Float3 cur_key_cache = scene.sim_key_buffer.read(Expr{ inst_data.y & 0xFFu });
+	                Float3 cur_key_cache = scene.sim_key_buffer.read(Expr{ receiver_layers_tp & 0xFFu });
 	                Float3 world_pos;
 #if NT_ENABLE_PROCEDURAL
 	                $if(is_procedural_gi_tp) {
@@ -911,8 +1238,8 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                Float2 prev_uv = (ndc + motion + 1.0f) * 0.5f;
 	                // Candidate search happens in dispatch space (half-res pixels
 	                // when giScale=2); motion vectors live in full-res UV space.
-	                Float2 prevFloat = (prev_uv * make_float2(Expr{make_uint2(fullres_w, fullres_h)}) - 0.5f)
-	                    / cast<Float>(giScale);
+	                        Float2 prevFloat = (prev_uv * make_float2(Expr{make_uint2(fullres_w, fullres_h)}) - 0.5f)
+		                    * invGiScale;
 	                // Stochastic rounding: add per-frame random jitter before flooring
 	                // to break temporal lock along screen axes at near-zero motion
 	                UInt sr_seed = util::xxhash32(make_uint3(pixel_index, frame_count, 17u));
@@ -948,12 +1275,11 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                // Candidate 5: fallback at current pixel (disocclusion recovery)
 	                UInt jit_seed = util::xxhash32(make_uint3(pixel_index, frame_count, 23u));
 	                UInt jit_start = jit_seed & 3u;
-	                Int jit_r = (_checkerboard ? 2 : 1) * cast<int>(giScale);
+	                Int jit_r = (_checkerboard ? 2 : 1) * giScaleI;
 
 	                // Lazy surface resolve: only computed on first valid candidate
 	                Bool surface_resolved = def(false);
                         SurfaceData surface;
-                        MaterialBSDF bsdf_mis;
                         Float glass_att_t = def(1.0f);
 
 	                $for(ti, 6u) {
@@ -975,13 +1301,13 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                           & cand_coord.y >= 0 & cand_coord.y < cast<int>(resolution.y)) {
 	                                UInt2 cand_uint = make_uint2(cast<uint>(cand_coord.x), cast<uint>(cand_coord.y));
 	                                UInt cand_pixel = cast<uint>(cand_coord.y) * resolution.x + cast<uint>(cand_coord.x);
-	                                if (_checkerboard) {
-	                                    // Half-res candidates use dense packing (no checkerboard);
-	                                    // full-res candidates use the checkerboard-compacted index.
-	                                    $if(giScale == 1u) {
-	                                        cand_pixel = cast<uint>(cand_coord.y) * rsv_res.x + (cast<uint>(cand_coord.x) >> 1u);
-	                                    };
-	                                }
+                                if (_checkerboard) {
+                                    // Half-res candidates use dense packing (no checkerboard);
+                                    // full-res candidates use the checkerboard-compacted index.
+                                    if (giScale == 1u) {
+                                        cand_pixel = cast<uint>(cand_coord.y) * rsv_res.x + (cast<uint>(cand_coord.x) >> 1u);
+                                    }
+                                }
 	                                // Prev-frame G-buffer images are full-res: tap through the
 	                                // same center-of-block mapping initial uses (identity at giScale==1).
 	                                UInt2 cand_gbuf = min(make_uint2(cand_uint.x * giScale + giScale / 2u, cand_uint.y * giScale + giScale / 2u),
@@ -997,17 +1323,17 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            // Without this, a reservoir from a different surface can
 	                            // leak through reprojection and stick at a screen pixel
 	                            // as the camera moves.
-	                            //
-	                            // The ti==5 fallback (current-pixel coord) still skips
-	                            // the depth/normal tests -- those are unreliable right at
-	                            // a disocclusion seam -- but the same-instance gate must
-	                            // hold. Without it, when dark geometry moves out of the
-	                            // way and reveals bright geometry, the fallback reads prev
-	                            // frame's reservoir (which was for the dark surface) and
-	                            // merges it into the bright pixel; prev's stale sample
-	                            // then dominates for a few frames and produces the
-	                            // disocclusion flash.
-	                            Float prev_depth_at = gbuf_depth_prev.read(cand_gbuf).x;
+                            //
+                            // The ti==5 fallback (current-pixel coord): RTXDI's
+                            // last temporal sample skips RTXDI_IsValidNeighbor
+                            // (normal+depth) and keeps only the material test
+                            // (TemporalResampling.hlsli:107-110), so the fallback
+                            // skips the depth half here and the normal half below;
+                            // surface compatibility is provided by the geometric
+                            // Jacobian reject band, which distinguishes "same
+                            // face, few px off" (J≈1) from "different surface
+                            // toward x2" (J outside [0.1, 10]).
+                            Float prev_depth_at = gbuf_depth_prev.read(cand_gbuf).x;
 	                            UInt4  prev_vis_at  = gbuf_vis_prev.read(cand_gbuf);
 	                            // Compensate camera-z motion: prev_depth_at stores t along the
 	                            // prev-frame primary ray. depth_ref_pos carries the object's
@@ -1030,15 +1356,70 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                    prev_key, cur_key_cache,
 	                                    p.giMatSimRoughness, p.giMatSimF0, p.giMatSimAlbedo);
 	                            };
-	                            // neighbor_ok's surface-independent half: false means the
-	                            // full gate below would reject this candidate anyway.
-	                            Bool pre_ok = same_instance
-	                                       & ((ti == 5u)
-	                                          | (depth_diff < p.spatialDepthThresh));
+                            // neighbor_ok's surface-independent half: false means the
+                            // full gate below would reject this candidate anyway.
+                            // The fallback (ti==5) is exempt from the depth half
+                            // (RTXDI parity; J band covers it — plan §3.3).
+                            Bool pre_ok = same_instance
+                                       & ((ti == 5u) | (depth_diff < p.spatialDepthThresh));
 	                            $if(pre_ok) {
 	                                Var<GIReservoir> prev_r = gi_reservoir_prev.read(cand_pixel);
 
-	                                $if(prev_r->is_valid() & prev_r->age() < maxAge) {
+	                                $if(prev_r->is_valid() & prev_r->age() < maxAge
+                                    & (prev_r->cache_hit() == 0u)) {
+	                                // Radiance freshness: smooth rejection for lighting
+	                                // changes (plan §3.2). Hoisted above the surface work —
+	                                // it reads only reservoir fields, and gates before
+	                                // paying for the resolve/BSDF/normal tap. The M==0 /
+	                                // degenerate-pdf bypass stays: it is what lets
+	                                // disocclusion recovery work.
+	                                Float3 prev_rad = prev_r->rad();
+	                                Float prev_rad_lum = luminance(prev_rad);
+	                                Float cur_rad_lum = luminance(current->rad());
+	                                Float freshnessWeight = def(1.0f);
+	                                $if(current->M() > 0u & current.target_pdf > 1e-8f & prev_rad_lum > 1e-4f) {
+	                                    Float rad_ratio = prev_rad_lum / max(cur_rad_lum, 1e-6f);
+	                                    Float logRatio = luisa::compute::abs(luisa::compute::log2(max(rad_ratio, 1e-6f)));
+	                                    // Knee'd curve (giFreshnessKnee, log2 units): full
+	                                    // weight up to 2^knee divergence, zero at 2^(knee+2).
+	                                    // knee <= 0 disables the gate (explicit check — the
+	                                    // raw curve at knee 0 would be the STRICTEST setting,
+	                                    // full reject at 4x, not the loosest).
+	                                    Float kneeCurve = luisa::compute::saturate(1.0f - (logRatio - p.giFreshnessKnee) / 2.0f);
+	                                    freshnessWeight = ite(p.giFreshnessKnee <= 0.0f, 1.0f, kneeCurve);
+	                                };
+
+	                                // Geometric Jacobian (plan §3.1) — RTXDI parity with the
+	                                // spatial pass (PassGI.cpp spatial kernel, same fn):
+	                                // pure solid-angle ratio over receiver motion only, sample
+	                                // normal from the reservoir; 0 outside [0.1, 10], clamped
+	                                // to [1/3, 3] in band (GIShading.h gi_geometric_jacobian).
+	                                // depth_ref_pos is the prev-transform reprojection of the
+	                                // current hit — exactly where the primary candidate's
+	                                // reservoir was created last frame; for cardinal
+	                                // candidates it approximates the neighbor's prev receiver
+	                                // within the candidate window (bounded by the reject band).
+	                                // Anti-drift (plan §9.1): only candidate 0's origin
+	                                // receiver is exact, so only its Jacobian may exceed 1 —
+	                                // an exact-origin J product telescopes across frames and
+	                                // cannot drift. Approximate-origin candidates may reject
+	                                // or reduce, but never inflate.
+	                                Float w_jac  = def(0.0f);  // w_prev multiplier (clamped J)
+	                                Bool  jac_gate = def(false);
+	                                {
+	                                    Float jacobian = gi_geometric_jacobian(
+	                                        world_pos, depth_ref_pos,
+	                                        prev_r->pos(), prev_r->nrm());
+	                                    jac_gate = jacobian > 0.0f;
+	                                    w_jac = ite(ti == 0u, jacobian, min(jacobian, 1.0f));
+	                                }
+
+	                                // Early gate: J band + freshness hold before any surface
+	                                // work, so out-of-band candidates skip the lazy resolve
+	                                // (vertex/texture fetches), the p_hat BSDF eval and the
+	                                // 8-16 B prev-normal tap.
+	                                Bool early_gate = jac_gate & (freshnessWeight > 0.01f);
+	                                $if(early_gate) {
 	                                // Lazy surface resolve on first valid candidate
 	                                $if(!surface_resolved) {
 	                                    Float2 screen_uv_gt = (make_float2(gbuf_coord) + 0.5f) / make_float2(Expr{make_uint2(fullres_w, fullres_h)});
@@ -1062,59 +1443,57 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                        inst_data, cur_prim_id, cur_bary,
 	                                        scene.material_buffer, wo,
 	                                        scene.instance_transform_buffer.read(cur_inst),
-	                                        0.0f, screen_uv_gt, fullres_w, fullres_h);
+	                                        0.0f, screen_uv_gt, fullres_w, fullres_h, cur_inst);
 #if NT_ENABLE_PROCEDURAL
 	                                    };
 #endif
+	                                    // Blend-rolled-opaque reclass (see Shading.h).
+	                                    reclass_blend_rolled_opaque(surface, cur_is_glass);
 	                                    glass_att_t = ite(cur_is_glass, luminance(glass_throughput.read(gbuf_coord).xyz()), 1.0f);
-	                                    bsdf_mis = surface.make_bsdf();
-                                    surface_resolved = def(true);
+	                                    surface_resolved = def(true);
 	                                };
+
+                                        // BSDF view over the (now resolved) surface — the view
+                                        // must be built where surface's locals already hold the
+                                        // post-resolve phi values. Construction is free (pure
+                                        // expression DAG); the t_rot/lobe-weight arithmetic rides
+                                        // the p_hat evaluate below, which dominates this block.
+	                                MaterialBSDF bsdf_mis = surface.make_bsdf();
 
 	                                // Normal test needs the resolved surface, so it runs
 	                                // after the lazy resolve; the depth/instance halves of
 	                                // the gate already ran before the reservoir read.
+	                                // The fallback (ti==5) skips the normal half too
+	                                // (RTXDI parity — plan §3.3; the J band is the
+	                                // surface-compatibility test for the fallback).
 	                                Float3 prev_ns_at   = denoise_normal_prev.read(cand_gbuf).xyz();
 	                                Float  n_dot        = luisa::compute::dot(surface.ns, prev_ns_at);
 	                                Bool   neighbor_ok  = same_instance
-	                                                      & ((ti == 5u)
-	                                                         | ((n_dot > p.spatialNormalThresh)
-	                                                            & (depth_diff < p.spatialDepthThresh)));
-
-	                                // Radiance freshness: smooth rejection for lighting changes
-	                                Float3 prev_rad = prev_r->rad();
-	                                Float prev_rad_lum = luminance(prev_rad);
-	                                Float cur_rad_lum = luminance(current->rad());
-	                                Float freshnessWeight = def(1.0f);
-	                                $if(current->M() > 0u & current.target_pdf > 1e-8f & prev_rad_lum > 1e-4f) {
-	                                    Float rad_ratio = prev_rad_lum / max(cur_rad_lum, 1e-6f);
-	                                    Float logRatio = luisa::compute::abs(luisa::compute::log2(max(rad_ratio, 1e-6f)));
-	                                    freshnessWeight = luisa::compute::saturate(1.0f - (logRatio - 1.0f) / 2.0f);
-	                                };
+	                                                     & ((ti == 5u) | (n_dot > p.spatialNormalThresh));
 
 	                                Float3 to_sample = prev_r->pos() - world_pos;
 	                                Float3 wi = to_sample * rsqrt(Expr{ max(dot(to_sample, to_sample), 1e-6f) });
 
 	                                Float p_hat_new = gi_evaluate_p_hat(
-                                    bsdf_mis,
-                                    wo, wi, surface.ns, prev_rad);
+	                                    bsdf_mis,
+	                                    wo, wi, surface.ns, prev_rad);
 
 	                                p_hat_new = p_hat_new * glass_att_t;
 
-	                                $if(p_hat_new > 1e-8f) {
-	                                    Float jacobian = p_hat_new / max(prev_r.target_pdf, 1e-6f);
-	                                    Float logJac = luisa::compute::abs(luisa::compute::log2(max(jacobian, 1e-6f)));
-	                                    Float jacobian_weight = luisa::compute::saturate(1.0f - logJac / 4.0f);
-
-	                                    Float prev_rough_dec = cast<Float>(prev_r->roughness()) / 63.0f;
+                                $if(p_hat_new > 0.0f) {
+                                    Float prev_rough_dec = cast<Float>(prev_r->roughness()) / 63.0f;
 	                                    Bool rough_ok_t = luisa::compute::abs(prev_rough_dec - surface.roughness) < p.giRoughnessInvalidationThresh;
-	                                    $if(jacobian_weight > 0.01f & freshnessWeight > 0.01f & neighbor_ok & rough_ok_t) {
-	                                        jacobian = clamp(jacobian, 1.0f / 3.0f, 3.0f);
-	                                        // RTXDI combine: risWeight = targetPdf * weightSum * M.
-	                                        // prev.weight_sum is post-finalize so the formula folds in domain
-	                                        // conversion. Algebraically equal to old formula under new rep.
+
+	                                    // J band + freshness already held via early_gate.
+	                                    $if(neighbor_ok & rough_ok_t) {
+	                                        // RTXDI combine: risWeight = targetPdf * weightSum * M
+	                                        // with the Jacobian folded into weightSum first
+	                                        // (GI/TemporalResampling.hlsli:151-156 + Reservoir.hlsli:214).
+	                                        // prev.weight_sum is post-finalize so the formula folds in
+	                                        // domain conversion. w_jac carries the clamped geometric J
+	                                        // (capped at 1 for approximate-origin candidates — §9.1).
 	                                        Float w_prev = p_hat_new * prev_r.weight_sum * cast<Float>(prev_r->M())
-	                                                     * jacobian_weight * freshnessWeight;
+	                                                     * w_jac * freshnessWeight;
 	                                        Float w_sum_merged = w_acc + w_prev;
 	                                        UInt  M_merged = current->M() + prev_r->M();
 
@@ -1158,6 +1537,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                        merged_cand_uint = cand_uint;
 	                                    };
 	                                };
+	                                };  // end $if(early_gate)
 	                            };
 	                            };
 	                        };
@@ -1194,8 +1574,10 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    // BASIC inverse query: resolve merged candidate surface regardless
 	                    // of geometry type (mesh or procedural).
 	                    $if(merged_inst_at != ~0u) {
-	                        UInt4   merged_inst_data = scene.instance_buffer.read(merged_inst_at);
-	                            Float2  merged_screen_uv = (make_float2(merged_gbuf) + 0.5f) / make_float2(Expr{make_uint2(fullres_w, fullres_h)});
+	                        // Mesh-only read; procedural merged candidates index the
+	                        // proc instance buffer instead (see the branches below).
+	                        UInt4   merged_inst_data = def(make_uint4(0u));
+	                    Float2  merged_screen_uv = (make_float2(merged_gbuf) + 0.5f) / make_float2(Expr{make_uint2(fullres_w, fullres_h)});
 	                        SurfaceData merged_surface;
 #if NT_ENABLE_PROCEDURAL
 	                        $if(merged_is_proc) {
@@ -1207,15 +1589,19 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                        }
 	                        $else {
 #endif
+	                            merged_inst_data = scene.instance_buffer.read(merged_inst_at);
 	                            merged_surface = resolve_surface_from_instance(
 	                                resolver, vertex_bindless, tex_bindless,
 	                                merged_inst_data, merged_prim_at, merged_bary_at,
 	                                scene.material_buffer, merged_wo,
 	                                scene.instance_transform_buffer.read(merged_inst_at),
-	                                0.0f, merged_screen_uv, fullres_w, fullres_h);
+	                                0.0f, merged_screen_uv, fullres_w, fullres_h, merged_inst_at);
 #if NT_ENABLE_PROCEDURAL
 	                        };
 #endif
+	                        // Blend-rolled-opaque reclass (see Shading.h) — merged glass bit.
+	                        reclass_blend_rolled_opaque(
+	                            merged_surface, Expr{ (merged_vis_at.y >> 31u) > 0u });
 
 	                        // Inverse query: winner's pdf at the merged neighbor's surface.
                         MaterialBSDF merged_bsdf = merged_surface.make_bsdf();
@@ -1312,8 +1698,11 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            Bool is_point_gi = ((vis.y >> 30u) & 1u) > 0u;
 	            Bool is_procedural_gi_sp = ((vis.y >> 29u) & 1u) > 0u;
 
-	            // Skip spatial reuse for glass pixels (same reason as temporal).
-	            $if(inst_id != ~0u & !is_glass_sp & !is_point_gi) {
+            // Skip spatial reuse for glass pixels (same reason as temporal).
+            // SHARC cache-hit reservoirs skip too (same reason as temporal —
+            // plan §9.2); the unconditional write below forwards them.
+            $if(inst_id != ~0u & !is_glass_sp & !is_point_gi
+                & (r->cache_hit() == 0u)) {
 	                // Save pre-merge state for post-merge visibility revert.
 	                // If spatial merge replaces r's x2 with a neighbor's x2
 	                // that's occluded from the current receiver, we restore
@@ -1328,10 +1717,27 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                Float3 wo = -normalize(ray->direction());
 	                UInt   prim_id_sp = vis.y & 0x3FFFFFFFu;
 	                Float2 bary_sp = gbuf_bary_motion.read(coord).xy();
-	                UInt4 inst_data = scene.instance_buffer.read(inst_id);
+	                // Receiver material layers: procedural receivers index the proc
+	                // instance buffer (inst_id is an AABB index — out of range for
+	                // the mesh instance buffer). Layers feed the spatial similarity
+	                // key below and the mesh surface resolve in the $else branch.
+	                UInt4 inst_data = def(make_uint4(0u));
+	                UInt receiver_layers_sp = def(0u);
+#if NT_ENABLE_PROCEDURAL
+	                $if(is_procedural_gi_sp) {
+	                    receiver_layers_sp = proc_bindless
+	                        .buffer<scene::ProcInstanceData>(render::kSlot_ProcInstances)
+	                    .read(inst_id).material_layers;
+	                } $else {
+#endif
+	                    inst_data = scene.instance_buffer.read(inst_id);
+	                    receiver_layers_sp = inst_data.y;
+#if NT_ENABLE_PROCEDURAL
+	                };
+#endif
 	                // Gap D: hoist current pixel similarity key for cross-instance
 	                // material-similarity lookup in spatial reuse (same pattern as temporal).
-	                Float3 cur_key_cache_sp = scene.sim_key_buffer.read(Expr{ inst_data.y & 0xFFu });
+	                Float3 cur_key_cache_sp = scene.sim_key_buffer.read(Expr{ receiver_layers_sp & 0xFFu });
 	                Float3 world_pos;
 	                SurfaceData surface;
 #if NT_ENABLE_PROCEDURAL
@@ -1365,10 +1771,13 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                    inst_data, prim_id_sp, bary_sp,
 	                    scene.material_buffer, wo,
 	                    scene.instance_transform_buffer.read(inst_id),
-	                    0.0f, screen_uv_gs, resolution.x, resolution.y);
+	                    0.0f, screen_uv_gs, resolution.x, resolution.y, inst_id);
 #if NT_ENABLE_PROCEDURAL
 	                };
 #endif
+
+	                // Blend-rolled-opaque reclass (see Shading.h).
+	                reclass_blend_rolled_opaque(surface, is_glass_sp);
 
 
 	                // Hoist bsdf_mis for spatial reuse p_hat (single construction per pixel)
@@ -1455,7 +1864,8 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            $if(normal_dot > p.spatialNormalThresh) {
 	                                Var<GIReservoir> nr = gi_reservoir_input.read(n_pixel);
 
-	                                $if(nr->is_valid() & nr.target_pdf > 1e-6f) {
+                                $if(nr->is_valid()
+                                    & (nr->cache_hit() == 0u)) {
 	                                    // Radiance consistency: reject neighbors whose stored radiance
 	                                    // diverges from the current pixel's radiance (e.g. stale bright
 	                                    // data from a light that moved away). Same smooth curve as temporal.
@@ -1485,7 +1895,7 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                    // Apply glass attenuation (hoisted before loop)
 	                                    p_hat_new = p_hat_new * glass_att_s;
 
-	                                    $if(p_hat_new > 1e-8f & sp_freshness > 0.01f) {
+	                                    $if(p_hat_new > 0.0f & sp_freshness > 0.01f) {
 	                                        // Geometric Jacobian (RTXDI-style, ReSTIR GI paper Eq.11)
 	                                        // Reconstruct neighbor world position from same-frame camera
 	                                        Float2 n_ndc = (make_float2(nc_uint) + 0.5f) / make_float2(resolution) * 2.0f - 1.0f;
@@ -1495,8 +1905,10 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                                        Float jacobian = gi_geometric_jacobian(
 	                                            world_pos, n_world_pos, sample_pos, sample_nrm);
 
-	                                        // Pdf-ratio gate (matches temporal's jacobian_weight at line 920-922).
-	                                        // Without this, a neighbor whose selected sample has very low
+                                        // Pdf-ratio gate (matches the temporal kernel's
+                                        // flag-off p_hat-ratio gate; the flag-on temporal
+                                        // path uses the geometric J band alone).
+                                        // Without this, a neighbor whose selected sample has very low
 	                                        // target_pdf (high weight_sum post-finalize) dominates the merge
 	                                        // when current's surface sees the same sample at much higher pdf.
 	                                        // Result: high weight_sum propagates along seams (the "GI flushes
@@ -1604,7 +2016,9 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            auto   n_ray_n = camera->generate_ray(n_ndc_n);
 	                            Float3 n_world_pos_n = n_ray_n->origin() + n_ray_n->direction() * n_depth_n;
 	                            Float3 n_wo_n = -normalize(n_ray_n->direction());
-	                            UInt4   n_inst_data_n = scene.instance_buffer.read(n_vis_n.x);
+	                            // Mesh-only read; procedural neighbors resolve from the
+	                            // proc instance buffers instead (branch below).
+	                            UInt4   n_inst_data_n = def(make_uint4(0u));
 	                            Float2  n_screen_uv_n = (make_float2(nc_uint_n) + 0.5f) / make_float2(resolution);
 	                            UInt    n_prim_n = n_vis_n.y & 0x3FFFFFFFu;
 #if NT_ENABLE_PROCEDURAL
@@ -1621,15 +2035,19 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	                            }
 	                            $else {
 #endif
+	                                n_inst_data_n = scene.instance_buffer.read(n_vis_n.x);
 	                                n_surface_n = resolve_surface_from_instance(
 	                                    resolver, vertex_bindless, tex_bindless,
 	                                    n_inst_data_n, n_prim_n, n_bary_n,
 	                                    scene.material_buffer, n_wo_n,
 	                                    scene.instance_transform_buffer.read(n_vis_n.x),
-	                                    0.0f, n_screen_uv_n, resolution.x, resolution.y);
+	                                    0.0f, n_screen_uv_n, resolution.x, resolution.y, n_vis_n.x);
 #if NT_ENABLE_PROCEDURAL
 	                            };
 #endif
+	                            // Blend-rolled-opaque reclass (see Shading.h) — neighbor glass bit.
+	                            reclass_blend_rolled_opaque(
+	                                n_surface_n, Expr{ (n_vis_n.y >> 31u) > 0u });
 
 	                            // Winner's pdf at this neighbor's surface
                             MaterialBSDF n_bsdf_n = n_surface_n.make_bsdf();
@@ -1714,7 +2132,9 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	        _boilingFilterGI = device.compile<2>([&](
 	            BufferVar<GIReservoir> gi_reservoir_buffer,
 	            Float strength,
-	            UInt cbField
+	            UInt cbField,
+	            ImageFloat firefly_flag,
+	            UInt firefly_replace
 	            ) noexcept {
 	            set_name("GI_BoilingFilter");
 	            set_block_size(16u, 16u, 1u);
@@ -1787,15 +2207,146 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	            // already have valid=false from the in_bounds gate above, so they
 	            // never enter this branch.
 	            Float multiplier = 10.0f / max(strength, 1e-6f) - 9.0f;
-	            $if(valid & (contrib > avg_w * multiplier)) {
-	                r->set_M(0u);
-	                r.weight_sum = 0.0f;
-	                r.target_pdf = 0.0f;
+	            Bool outlier = valid & (contrib > avg_w * multiplier);
+	            // RTXDI 3.1 fireflyReplacementFilter: when decorrelation is
+	            // active, flag outliers for the shade-time swap-to-initial
+	            // (energy-preserving replacement) instead of culling them here
+	            // (ref Decorrelation.hlsli RTXDI_PTDetectDecorrelationFireflies;
+	            // deviation: our filter runs pre-spatial, so the flag marks the
+	            // temporal reservoir that seeded the outlier).
+	            $if(firefly_replace != 0u) {
+	                firefly_flag.write(rsv, make_float4(ite(outlier, 1.0f, 0.0f)));
+	            } $else {
+	                $if(outlier) {
+	                    r->set_M(0u);
+	                    r.weight_sum = 0.0f;
+	                    r.target_pdf = 0.0f;
+	                };
 	            };
 
 	            gi_reservoir_buffer.write(pixel_index, r);
 	        });
-	        } // end resolverOnly gate (BoilingFilterGI)
+
+	        //==========================================================================
+	        // Stagnancy Smoothing (RTXDI 3.1 RTXDI_PTComputeSmoothedDuplicationMap
+	        // adaptation; docs/rtxdi31_cgns_decorrelation_plan.md)
+	        //==========================================================================
+	        _stagnancySmoothShader = device.compile<2>([&](
+	            BufferVar<GIParams> params,
+	            BufferVar<GIReservoir> gi_reservoir_buffer,
+	            ImageFloat gbuf_bary_motion,
+	            ImageFloat gbuf_depth,
+	            ImageUInt  gbuf_vis,
+	            ImageFloat gbuf_depth_prev,
+	            ImageUInt  gbuf_vis_prev,
+	            ImageFloat stagnancy_prev,
+	            ImageFloat stagnancy_out,
+	            UInt cbField,
+	            UInt reset_history
+	            ) noexcept {
+	            set_name("GI_SmoothStagnancy");
+	            set_block_size(16u, 16u, 1u);
+	            Var<GIParams> p = params.read(0u);
+	            UInt2 rsv     = dispatch_id().xy();
+	            UInt2 rsv_res = dispatch_size().xy();
+	            // Same shaded-space mapping as the shade kernel's GI read:
+	            // compacted dispatch -> full-res G-buffer coords (identical in
+	            // full- and half-res GI modes — shade always reads the
+	            // checkerboard-compacted reservoir buffer).
+	            UInt2 coord;
+	            UInt2 resolution;
+	            if (_checkerboard) {
+	                coord = make_uint2(rsv.x << 1u, rsv.y);
+	                coord.x = coord.x + ((coord.y + cbField) & 1u);
+	                resolution = make_uint2(rsv_res.x * 2u, rsv_res.y);
+	            } else {
+	                coord = rsv;
+	                resolution = rsv_res;
+	            }
+	            UInt pixel_index = rsv.y * rsv_res.x + rsv.x;
+
+	            // Current raw stagnancy: final reservoir age normalized by the
+	            // expected lifetime (RTXDI stores age/40; we normalize by the
+	            // tunable giMaxAge so FPS-aware derivation tracks automatically).
+	            Var<GIReservoir> r = gi_reservoir_buffer.read(pixel_index);
+	            Float current = ite(r->is_valid(),
+	                saturate(cast<Float>(r->age()) / max(cast<Float>(p.giMaxAge), 1.0f)),
+	                0.0f);
+
+	            // Reprojection into the previous frame via the NDC motion
+	            // vector (same convention as the GI temporal pass).
+	            Float2 ndc     = (make_float2(coord) + 0.5f) / make_float2(resolution) * 2.0f - 1.0f;
+	            Float2 motion  = gbuf_bary_motion.read(coord).zw();
+	            Float2 prev_uv = (ndc + motion + 1.0f) * 0.5f;
+	            Int2   prev_full = make_int2(prev_uv * make_float2(resolution) - 0.5f);
+
+	            // Soft heuristic prev-validity gate (the stagnancy signal is a
+	            // heuristic, not a correctness path): same instance + relative
+	            // depth consistency at the reprojected tap. Failing it just
+	            // bootstraps the smoothing from the current raw value.
+	            Bool prev_valid = def(false);
+	            Int2 prev_c = def(make_int2(0, 0));
+	            $if(reset_history == 0u) {
+	                $if(prev_full.x >= 0 & prev_full.x < cast<int>(resolution.x)
+                  & prev_full.y >= 0 & prev_full.y < cast<int>(resolution.y)) {
+                    UInt2 pf = make_uint2(cast<uint>(prev_full.x), cast<uint>(prev_full.y));
+                    Float pd = gbuf_depth_prev.read(pf).x;
+                    UInt4  pv = gbuf_vis_prev.read(pf);
+                    Float cd = gbuf_depth.read(coord).x;
+                    UInt4  cv = gbuf_vis.read(coord);
+                    Float dd = luisa::compute::abs(pd - cd) / max(max(pd, cd), 0.01f);
+                    prev_valid = (pv.x == cv.x) & (dd < 0.1f);
+                    prev_c = make_int2(prev_full.x, prev_full.y);
+                    if (_checkerboard) {
+                        prev_c = make_int2(prev_full.x >> 1, prev_full.y);
+                    }
+                };
+	            };
+
+	            Float smoothed = def(current);
+	            $if(prev_valid) {
+	                // 5x5 a-trous box (step 2) around the reprojected tap,
+	                // uniform weights, in-bounds normalized (ref
+	                // DuplicationMap.hlsli:47-107). Static taps — no dynamic
+	                // indexing, tiny body (no DXC unroll hazard).
+	                Float prev_sum    = def(0.0f);
+	                Float weight_sum  = def(0.0f);
+	            for (int dy = -2; dy <= 2; ++dy) {
+	            for (int dx = -2; dx <= 2; ++dx) {
+	                    Int tx = prev_c.x + dx * 2;
+	                    Int ty = prev_c.y + dy * 2;
+                        $if(tx >= 0 & tx < cast<Int>(rsv_res.x)
+                          & ty >= 0 & ty < cast<Int>(rsv_res.y)) {
+                            prev_sum = prev_sum
+                                + stagnancy_prev.read(make_uint2(cast<uint>(tx), cast<uint>(ty))).x;
+                            weight_sum = weight_sum + 1.0f;
+                        };
+                    };
+	            };
+                Float prev_avg = ite(weight_sum > 0.0f, prev_sum / weight_sum, current);
+                Float ema = saturate(p.giDecorrelationEmaFactor);
+                smoothed = ema * current + (1.0f - ema) * prev_avg;
+	            };
+
+	            stagnancy_out.write(rsv, make_float4(saturate(smoothed)));
+	        });
+
+	        //==========================================================================
+	        // Zero-fill for stagnancy/firefly images (recycled-heap garbage
+	        // otherwise — same rationale as the reservoir zero-fill).
+	        //==========================================================================
+	        _zeroFloatImageShader = device.compile<2>([&](
+	            ImageFloat img,
+	            UInt count
+	            ) noexcept {
+	            set_name("GI_ZeroFloatImage");
+	            set_block_size(16u, 16u, 1u);
+	            UInt idx = dispatch_id().x + dispatch_id().y * dispatch_size().x;
+	            $if(idx < count) {
+	                img.write(dispatch_id().xy(), make_float4(0.0f));
+	            };
+	        });
+	        } // end resolverOnly gate (BoilingFilterGI + stagnancy smoothing)
 
 		}
 	//==========================================================================
@@ -1813,9 +2364,55 @@ $if(!hit->miss() & Expr{ hit.inst != receiver_inst }) {
 	uint half_pixel_count = _halfWidth * _halfHeight;
 	_giResBufHalf[0]      = device.create_buffer<GIReservoir>(half_pixel_count);
 	_giResBufHalf[1]      = device.create_buffer<GIReservoir>(half_pixel_count);
-	_giReservoirBufferFull = device.create_buffer<GIReservoir>(pixel_count);
-	_giInitialSnapshot     = device.create_buffer<GIReservoir>(pixel_count);
-	_giParamsBuf           = device.create_buffer<GIParams>(1u);
+		_giReservoirBufferFull = device.create_buffer<GIReservoir>(pixel_count);
+		_giInitialSnapshot     = device.create_buffer<GIReservoir>(pixel_count);
+		_giParamsBuf           = device.create_buffer<GIParams>(1u);
+
+	// Stagnancy decorrelation textures (RTXDI 3.1): smoothed-stagnancy
+	// ping-pong pair + boiling-filter firefly flag, at the shade
+	// (checkerboard-compacted) resolution — the same space the shade
+	// kernel reads the GI reservoir buffer in, both GI modes.
+	_stagnancyWidth  = rsv_w;
+	_stagnancyHeight = height;
+	for (auto& tex : _giStagnancy) {
+		tex = device.create_image<float>(PixelStorage::HALF1, rsv_w, height, 1u, true);
+	}
+	_giFireflyFlag = device.create_image<float>(PixelStorage::HALF1, rsv_w, height, 1u, true);
+}
+
+	void PassGI::zeroInitBuffers() {
+		// Recreated buffers contain recycled-heap bytes; is_valid()==M()>0
+		// treats garbage as a live reservoir with a wild sample position, which
+		// GI temporal/spatial and shade turn into degenerate rays (resize-TDR
+		// root cause 2026-09-16). Zeroed == M()==0 == invalid == "no history".
+		if (!_giResBuf[0] || !_zeroGIReservoirShader) return;
+		auto zero = [&](luisa::compute::Buffer<GIReservoir>& buf,
+		                luisa::compute::CommandList& cl) {
+			auto count = static_cast<luisa::uint>(buf.size());
+			cl << _zeroGIReservoirShader(buf, count)
+			      .dispatch((count + 255u) / 256u);
+		};
+	auto cl = luisa::compute::CommandList::create();
+	zero(_giResBuf[0], cl);
+	zero(_giResBuf[1], cl);
+	zero(_giResBufHalf[0], cl);
+	zero(_giResBufHalf[1], cl);
+	zero(_giReservoirBufferFull, cl);
+	zero(_giInitialSnapshot, cl);
+	// Stagnancy pair + firefly flag: garbage reads would fabricate high
+	// decorrelation probabilities on the first frames after a resize.
+	if (_stagnancyWidth != 0u && _zeroFloatImageShader) {
+		uint count = _stagnancyWidth * _stagnancyHeight;
+		auto zero_img = [&](luisa::compute::Image<float>& img,
+		                    luisa::compute::CommandList& cl2) {
+			cl2 << _zeroFloatImageShader(img, count)
+			       .dispatch((_stagnancyWidth + 15u) / 16u, (_stagnancyHeight + 15u) / 16u);
+		};
+		zero_img(_giStagnancy[0], cl);
+		zero_img(_giStagnancy[1], cl);
+		zero_img(_giFireflyFlag, cl);
+	}
+	Renderer::stream() << cl.commit();
 }
 
 void PassGI::release() {
@@ -1825,6 +2422,9 @@ void PassGI::release() {
     _giResBufHalf[1].release();
     _giReservoirBufferFull.release();
     _giInitialSnapshot.release();
+    _giStagnancy[0].release();
+    _giStagnancy[1].release();
+    _giFireflyFlag.release();
 }
 
 	//==========================================================================
@@ -1855,6 +2455,8 @@ void PassGI::release() {
 		_giParamsCpu.giTier3BiasCorrectionEnabled   = _giTier3BiasCorrectionEnabled ? 1u : 0u;
 		_giParamsCpu.giSuppressAwayFromLight        = _giSuppressAwayFromLight ? 1u : 0u;
 		_giParamsCpu.giSuppressAwayFromLightThresh  = _giSuppressAwayFromLightThresh;
+		_giParamsCpu.giFreshnessKnee                = _giFreshnessKnee;
+		_giParamsCpu.giDecorrelationEmaFactor       = _giDecorrelationEmaFactor;
 		cmdlist << _giParamsBuf.copy_from(&_giParamsCpu);
 	}
 
@@ -1894,13 +2496,20 @@ void PassGI::release() {
 			_presampleEnvTotalEntries,
 			ctx.cbField,
 			ctx.glassThroughput,
-			_giOneBounce ? 1u : 0u,
-			_giHalfRes ? 2u : 1u,
+			// oneBounce/giScale/hasTransparentShadowCasters/sharcQueryOn are
+			// compile-time baked (see compileImpl) — no longer passed here.
 			_giSuppressAwayFromLight ? 1u : 0u,
-			_giSuppressAwayFromLightThresh,
-			ctx.geometry.has_transparent_shadow_casters() ? 1u : 0u
+			_giSuppressAwayFromLightThresh
 #if NT_ENABLE_PROCEDURAL
 	        , *_procBindlessPtr
+#endif
+#if NT_ENABLE_SHARC
+			// Phase-2 query bindings (wired by Pipeline after PassSharc
+			// createResources — same lifetime assumption as the presample
+			// tiles above). Query runs only when the cache is maintained
+			// AND the A/B toggle is on.
+			, *_sharcParamsPtr, *_sharcEntriesPtr, *_sharcResolvedPtr,
+			*_sharcQueryStatsPtr
 #endif
 		).dispatch(dw, dh);
 	}
@@ -1930,8 +2539,8 @@ void PassGI::release() {
 			ctx.cbField,
 			ctx.glassThroughput,
 			ctx.gbufDepthPrev, ctx.gbufVisPrev, ctx.denoiseNormalPrev,
-			_giTier3BiasCorrectionEnabled ? 1u : 0u,
-			_giHalfRes ? 2u : 1u
+			_giTier3BiasCorrectionEnabled ? 1u : 0u
+			// giScale is compile-time baked (see compileImpl).
 #if NT_ENABLE_PROCEDURAL
 			, *_procBindlessPtr
 #endif
@@ -1947,11 +2556,41 @@ void PassGI::release() {
 		auto& buf = _giHalfRes ? halfReservoirBuffer() : reservoirBuffer();
 		uint dw = _giHalfRes ? _halfWidth  : (_checkerboard ? (ctx.width + 1u) / 2u : ctx.width);
 		uint dh = _giHalfRes ? _halfHeight : ctx.height;
+		// Firefly flag is full-res-mode only: the half-res boiling dispatch
+		// covers only half the flag texture's rows, so flagging there would
+		// leave stale rows. Half-res keeps the cull behavior.
+		uint firefly_replace = (!_giHalfRes && giFireflyReplaceActive()) ? 1u : 0u;
 		cmdlist << _boilingFilterGI(
 			buf,
 			strength,
-			ctx.cbField
+			ctx.cbField,
+			_giFireflyFlag,
+			firefly_replace
 		).dispatch(dw, dh);
+	}
+
+	//==========================================================================
+	// PassGI::renderStagnancySmooth
+	//==========================================================================
+	void PassGI::renderStagnancySmooth(luisa::compute::CommandList& cmdlist, const FrameContext& ctx) {
+		if (_stagnancyWidth == 0u || !_stagnancySmoothShader) return;
+		uint write_idx = 1u - _giStagnancyIdx;
+		cmdlist << _stagnancySmoothShader(
+			_giParamsBuf,
+			reservoirBuffer(),               // final GI reservoirs (post pre-shade
+			                                  // flip; the same buffer shade reads)
+			ctx.gbufBaryMotion,
+			ctx.gbufDepth,
+			ctx.gbufVis,
+			ctx.gbufDepthPrev,
+			ctx.gbufVisPrev,
+			_giStagnancy[_giStagnancyIdx],   // prev smoothed (read)
+			_giStagnancy[write_idx],         // smoothed out (write)
+			ctx.cbField,
+			ctx.accumReset ? 1u : 0u         // history reset -> bootstrap from raw
+		).dispatch(_stagnancyWidth, _stagnancyHeight);
+		// Rotate: stagnancyTexture() now returns the freshly written slot.
+		_giStagnancyIdx = write_idx;
 	}
 
 	//==========================================================================
@@ -2033,6 +2672,8 @@ void PassGI::release() {
 	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("ON = initial+temporal+boiling run at half res, upsampled after boiling (~2x faster than before with checkerboard, ~4x without). OFF = full-res.");
 	            ImGui::Checkbox("GI Tier 3 Bias Correction", &_giTier3BiasCorrectionEnabled);
 	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("ON = reject cross-surface fireflies (may dim low-roughness metal). OFF by default.");
+	            ImGui::SliderFloat("GI Freshness Knee (log2)", &_giFreshnessKnee, 0.0f, 8.0f);
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Temporal radiance-divergence knee in log2 units: full merge weight up to 2^knee divergence, zero at 2^(knee+2).\n5 = default (32x/128x). 1 = strict curve (2x/8x). 0 = gate disabled.");
 	            ImGui::SliderFloat("GI Bias Correction Divergence Thresh", &_giBiasCorrectionDivergenceThresh, 0.0f, 10.0f);
 	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Higher = skip bias correction more often (preserves diffuse brightness, less firefly rejection). Lower = always apply.");
 	            ImGui::SliderFloat("GI MIS Roughness", &_giMISRoughness, 0.0f, 1.0f);
@@ -2068,6 +2709,30 @@ void PassGI::release() {
 	            ImGui::EndDisabled();
 	            ImGui::SliderInt("GI Spatial Radius (px)", reinterpret_cast<int*>(&_giSpatialRadius), 4, 64);
 	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Spatial-reuse neighbor disk radius. Higher = more candidates at screen-edge disocclusion; too high bleeds across edges. RTXDI default 32.");
+	            ImGui::SeparatorText("Stagnancy Decorrelation (RTXDI 3.1)");
+	            const char* decor_modes[] = { "None", "Uniform", "Stagnancy" };
+	            int decor_mode_i = static_cast<int>(_giDecorrelationMode);
+	            ImGui::Combo("Decorrelation Mode", &decor_mode_i, decor_modes, 3);
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("RTXDI 3.1 final-shading decorrelation: with a per-pixel probability, shade swaps the reused GI reservoir for the frozen initial one (1-sample MIS) — decorrelates temporally-correlated input noise (ReLAX ghosting; DLSS-RR compatibility). Stagnancy scales the probability by how long the pixel kept its sample.");
+	            _giDecorrelationMode = static_cast<uint>(decor_mode_i);
+	            ImGui::SliderFloat("Decorrelation Factor", &_giDecorrelationFactor, 0.0f, 1.0f, "%.3f");
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Base swap probability (RTXDI: 0.05 RR-off / 0.1 RR-on). In Stagnancy mode p = saturate(4*factor*stagnancy^exponent).");
+	            ImGui::SliderFloat("Decorrelation Stagnancy Exp", &_giDecorrelationStagnancyExponent, 0.0f, 4.0f, "%.2f");
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Stagnancy^exponent shaping (RTXDI: 1.5 RR-off / 1.0 RR-on). Higher = only very stagnant pixels swap.");
+	            ImGui::SliderFloat("Decorrelation EMA Factor", &_giDecorrelationEmaFactor, 0.0f, 1.0f, "%.2f");
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("Stagnancy smoothing: 1 = raw age only, 0 = keep smoothed history indefinitely (RTXDI: 0.2 RR-off / 0.1 RR-on).");
+	            ImGui::Checkbox("Firefly Replacement", &_giDecorrelationFirefly);
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("GI boiling-filter outliers get flagged and force-swapped to the initial reservoir at shade (energy-preserving) instead of being culled. Full-res GI mode only. Requires a decorrelation mode != None.");
+	            ImGui::SliderFloat("Firefly Bias Bound", &_giDecorrelationMultiplyBound, 1.0f, 30.0f, "%.0f");
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("When a swap lands on a fresh reservoir (age 0), cap its weight at bound*current to bound the firefly-replacement bias (RTXDI default 10).");
+	            if (ImGui::Button("Apply RR-style preset")) {
+	                _giDecorrelationMode = 2u;
+	                _giDecorrelationFactor = 0.1f;
+	                _giDecorrelationStagnancyExponent = 1.0f;
+	                _giDecorrelationEmaFactor = 0.1f;
+	                _giDecorrelationFirefly = true;
+	            }
+	            if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("RTXDI 3.1 DLSS-RR compatibility defaults (Stagnancy, 0.1/1.0/0.1, firefly replacement on) — the intended preset for a future DLSS-RR hookup.");
 	        }
 	    }
 	}
@@ -2097,6 +2762,13 @@ void PassGI::release() {
 	        {"giBiasCorrectionDivergenceThresh", _giBiasCorrectionDivergenceThresh},
 	        {"giSuppressAwayFromLight", _giSuppressAwayFromLight},
 	        {"giSuppressAwayFromLightThresh", _giSuppressAwayFromLightThresh},
+	        {"giFreshnessKnee", _giFreshnessKnee},
+	        {"giDecorrelationMode", _giDecorrelationMode},
+	        {"giDecorrelationFactor", _giDecorrelationFactor},
+	        {"giDecorrelationStagnancyExponent", _giDecorrelationStagnancyExponent},
+	        {"giDecorrelationEmaFactor", _giDecorrelationEmaFactor},
+	        {"giDecorrelationFirefly", _giDecorrelationFirefly},
+	        {"giDecorrelationMultiplyBound", _giDecorrelationMultiplyBound},
 	        {"spatialNormalThresh",    _spatialNormalThresh},
 	        {"spatialDepthThresh",     _spatialDepthThresh},
 	        {"giAccumulationTimeEnabled", _giAccumulationTimeEnabled},
@@ -2125,6 +2797,13 @@ void PassGI::release() {
 		_giBiasCorrectionDivergenceThresh = j.value("giBiasCorrectionDivergenceThresh", _giBiasCorrectionDivergenceThresh);
 	    _giSuppressAwayFromLight = j.value("giSuppressAwayFromLight", _giSuppressAwayFromLight);
 	    _giSuppressAwayFromLightThresh = j.value("giSuppressAwayFromLightThresh", _giSuppressAwayFromLightThresh);
+	    _giFreshnessKnee = j.value("giFreshnessKnee", _giFreshnessKnee);
+	    _giDecorrelationMode = std::clamp(j.value("giDecorrelationMode", _giDecorrelationMode), 0u, 2u);
+	    _giDecorrelationFactor = std::clamp(j.value("giDecorrelationFactor", _giDecorrelationFactor), 0.0f, 1.0f);
+	    _giDecorrelationStagnancyExponent = std::max(j.value("giDecorrelationStagnancyExponent", _giDecorrelationStagnancyExponent), 0.0f);
+	    _giDecorrelationEmaFactor = std::clamp(j.value("giDecorrelationEmaFactor", _giDecorrelationEmaFactor), 0.0f, 1.0f);
+	    _giDecorrelationFirefly = j.value("giDecorrelationFirefly", _giDecorrelationFirefly);
+	    _giDecorrelationMultiplyBound = std::max(j.value("giDecorrelationMultiplyBound", _giDecorrelationMultiplyBound), 1.0f);
 	    _spatialNormalThresh    = j.value("spatialNormalThresh",    _spatialNormalThresh);
 	    _spatialDepthThresh     = j.value("spatialDepthThresh",     _spatialDepthThresh);
 	    _giAccumulationTimeEnabled = j.value("giAccumulationTimeEnabled", _giAccumulationTimeEnabled);

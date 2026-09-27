@@ -70,19 +70,25 @@ public:
         auto greenMatIdx = pipeline.addMaterial("green",
             render::make_diffuse(luisa::make_float3(0.1f, 0.8f, 0.1f)));
 
-        auto cyanMatIdx = pipeline.addMaterial("cyan",
+        _litMatIdx = pipeline.addMaterial("cyan",
             render::make_emissive(luisa::make_float3(10.0f, 10.0f, 10.0f)));
 
         auto orangeMatIdx = pipeline.addMaterial("orange",
             render::make_emissive(luisa::make_float3(400.0f, 28.0f, 8.0f)));
+
+        render::MaterialTextures textures;
+        textures.albedo = render::TextureConverter::loadAsset("textures/streetview.png", device);// , & matPool->stream());// , true, true);
+        render::TextureCompressionSettings compression;
+        compression.enableCompression = true;  // Master toggle
 
         uint whiteMatIdx;
         if (external_albedo_slot() >= 0) {
             // video player / splash sim output as albedo
             whitemat.albedoTexIdx = static_cast<uint>(external_albedo_slot());
             whiteMatIdx = matPool->createMaterial("custom", whitemat);
-        } else {
-            whiteMatIdx = matPool->createMaterial("custom", whitemat);
+        }
+        else {
+            whiteMatIdx = matPool->createMaterial("custom", whitemat, std::move(textures), compression);
         }
 
         auto layermat = render::make_clearcoat();
@@ -125,16 +131,38 @@ public:
             render::make_conductor_metal(render::MetalPreset::Gold)
         );
 
+#if RT_RUNTIME
+        // Glass-blend verification (docs/glass_blend_plan.md): the center
+        // sphere uses the DLL glass_blend_resolver (5th registration -> tag
+        // 18; runtime_shaders/CustomMaterialShader). bsdf_type_override = 3
+        // routes it through the PSR glass branch; the resolver's world-x band
+        // blends glass (left) <-> amber diffuse (right) with a static-IGN
+        // dithered midband. Expect: refraction through the left half, lit
+        // diffuse on the right, stable dither midband when the camera is
+        // still, shadows blocked behind the diffuse half and attenuated
+        // behind the glass half.
+        render::MaterialData blendMat = render::make_dielectric(
+            luisa::make_float3(1.f), 1.5f, 0.f);
+        blendMat.type               = 18u;  // DLL glass_blend_resolver
+        blendMat.bsdf_type_override = 3.f;  // classify as Dielectric for PSR
+        blendMat.roughness          = 0.f;
+        auto sphBlendIdx = pipeline.addMaterial("sphere_blend", blendMat);
+#endif
+
         {
             scene::StaticTransform identity;
             auto sphTransform = scene::StaticTransform::create(tolc(glm::translate(vec3(.0f, 0.f, .0f))));
-            auto cubeMesh = scene::MeshShape::create(device, checkerMatIdx);
+            auto cubeMesh = scene::MeshShape::create(device, whiteMatIdx);
             cubeMesh->set_layer(1, layerMatIdx);
             cubeMesh->load_from(ObjLoader(app::loadAsset("models/obj1.obj")));
             cubeMesh->build(stream);
             pipeline.addShape(std::move(cubeMesh), &identity);
 
+#if RT_RUNTIME
+            auto sphMesh = scene::MeshShape::create(device, sphBlendIdx);
+#else
             auto sphMesh = scene::MeshShape::create(device, sphMatIdx);
+#endif
             sphMesh->load_from(ObjLoader(app::loadAsset("models/sphere.obj")));
             sphMesh->build(stream);
             pipeline.addShape(std::move(sphMesh), sphTransform.get());
@@ -156,7 +184,7 @@ public:
             auto cubeMesh = scene::MeshShape::create(device, sphMatIdx);
             cubeMesh->load_from(geom::Cube().size(vec3(.35f)));
             cubeMesh->build(stream);
-            _occluderTrans = nt::scene::AnimatedTransform::create(tolc(glm::translate(vec3(.0f, 1.f, 4.f))));
+            _occluderTrans = nt::scene::AnimatedTransform::create(tolc(glm::translate(vec3(.0f, 1.f, 1.f))));
             pipeline.addShape(std::move(cubeMesh), _occluderTrans.get());
         }
 #endif
@@ -166,22 +194,29 @@ public:
         //======================================================================
         {
             TriMesh whiteLightMesh = ObjLoader(app::loadAsset("models/arealight.obj"));
-            auto whiteLight = scene::make_light(device, whiteLightMesh, cyanMatIdx);
+            auto whiteLight = scene::make_light(device, whiteLightMesh, _litMatIdx);
 
             auto whiteLightTransform = scene::StaticTransform::create(tolc(glm::scale(glm::vec3(1.5f, 1.f, 1.5f))));
-            pipeline.addLightShape(std::move(whiteLight), whiteLightTransform.get());
+            _litID = pipeline.addLightShape(std::move(whiteLight), whiteLightTransform.get());
+            //pipeline.setShapeCameraVisibility(_litID, false);
         }
     }
 
-    void update(float time, float) override {
+    void update(float time, float, core::Pipeline& pipeline) override {
         if (_occluderTrans)
             _occluderTrans->set_position(vec3(glm::sin(time), 1.f, glm::cos(time)));
+
+        //auto mat = render::make_emissive();
+        //mat.emission = 4.f * (.5f + glm::cos(time)) * make_float3(1.f,.5f,.25f);
+        //pipeline.material()->updateMaterialData(_litMatIdx, mat);
     }
 
 private:
     // Animated transforms are polled by the pipeline every frame — they must
     // stay alive for the lifetime of the scene.
     nt::scene::AnimTransPtr _glassTrans, _occluderTrans;
+    nt::scene::ShapeId _litID;
+    uint _litMatIdx;
 };
 
 } // anonymous namespace

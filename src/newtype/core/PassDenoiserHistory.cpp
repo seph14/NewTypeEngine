@@ -41,6 +41,10 @@ void RelaxDenoiser::compileHistory(Device& device) {
 
 		UInt2 pixelPos = dispatch_id().xy();
 		auto c = consts.read(0u);
+		// Compile-time projection tag (§9 perf fix): C++ constant — every
+		// projection condition below folds in DXC, so the perspective build
+		// keeps the pre-projection instruction sequence.
+		const uint bakedProjection = _bakedProjection;
 
 		UInt  rectW = cast<uint>(c.gRectSizeX);
 		UInt  rectH = cast<uint>(c.gRectSizeY);
@@ -77,17 +81,28 @@ void RelaxDenoiser::compileHistory(Device& device) {
 		Float3 centerNormal = luisa::compute::normalize(centerNR.xyz() * 2.0f - 1.0f);
 		Float centerMaterialID = luisa::compute::floor(centerNR.w);  // unpack matID from packed matID+roughness
 
-		// Center world position (perspective: gOrthoMode = 0)
+		// Center world position (perspective: gOrthoMode = 0). True-point form
+		// viewZ * (fwd + right*cx + up*cy) — the inverse of Camera::generate_ray;
+		// texel uv is Y-UP so the up term carries +cy (the former -up mirrored
+		// positions about the camera's horizontal axis), and no ray-length
+		// normalization: viewZ is z-depth (same convention as TA/PrePass).
 		Float2 clipXY = (make_float2(pixelPos) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
 		Float3 frustumFwd = c.gFrustumForward.xyz();
 		Float3 frustumRight = c.gFrustumRight.xyz();
 		Float3 frustumUp = c.gFrustumUp.xyz();
-		Float3 rayDir = frustumFwd + frustumRight * clipXY.x - frustumUp * clipXY.y;
-		Float centerViewZc = centerViewZ / luisa::compute::length(rayDir);
-		Float3 centerWorldPos = centerViewZc * rayDir;
+		// Point-origin projections: viewZ * pixel-direction(uv) (§5.4).
+		Float3 reconDir = def((frustumFwd + frustumRight * clipXY.x + frustumUp * clipXY.y));
+		if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+		    reconDir = util::eval_point_origin_direction(clipXY,
+		        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+		        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+		}
+		Float3 centerWorldPos = centerViewZ * reconDir;
 
 		// Depth threshold (scaled by viewZ for perspective)
-		Float depthThreshold = c.gDepthThreshold * centerViewZc;
+		Float depthThreshold = c.gDepthThreshold * centerViewZ;
 
 		// NRD HistoryFix specular weight params: GetNormalWeightParams_ATrous with
 		// fixed hl=5, specConf=1, relax=0 (matches NRD's HistoryFix constant args).
@@ -127,11 +142,19 @@ void RelaxDenoiser::compileHistory(Device& device) {
 					$continue;
 				};
 
-				// Sample position with stride, clamped to screen bounds
+				// Sample position with stride; equirect/cylindrical wrap u
+				// across the seam instead of clamping.
 				Int2 offset = make_int2(i, j) * cast<int>(r);
-				UInt2 samplePos = make_uint2(clamp(
-					make_int2(pixelPos) + offset,
-					make_int2(0), make_int2(rectWint, rectHint)));
+				Int2 samplePosInt = make_int2(pixelPos) + offset;
+				if (bakedProjection == 1u | bakedProjection == 2u) {
+					Int wx = samplePosInt.x - rectWint * (samplePosInt.x / rectWint);
+					wx = wx + ite(wx < 0, rectWint, 0);
+					samplePosInt.x = wx;
+					samplePosInt.y = clamp(samplePosInt.y, 0, rectHint);
+				} else {
+					samplePosInt = clamp(samplePosInt, make_int2(0), make_int2(rectWint, rectHint));
+				}
+				UInt2 samplePos = make_uint2(samplePosInt);
 
 				// Read sample data
 				Float sampleViewZ = luisa::compute::abs(gIn_ViewZ.read(samplePos).x);
@@ -144,11 +167,17 @@ void RelaxDenoiser::compileHistory(Device& device) {
 					sampleNR.xyz() * 2.0f - 1.0f
 				);
 
-				// Sample world position
+				// Sample world position (point-origin: pixel-direction form)
 				Float2 sampleClipXY = (make_float2(samplePos) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
-				Float3 sampleRayDir = frustumFwd + frustumRight * sampleClipXY.x - frustumUp * sampleClipXY.y;
-				Float sampleViewZc = sampleViewZ / luisa::compute::length(sampleRayDir);
-				Float3 sampleWorldPos = sampleViewZc * sampleRayDir;
+				Float3 reconDir = def((frustumFwd + frustumRight * sampleClipXY.x + frustumUp * sampleClipXY.y));
+				if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+				    reconDir = util::eval_point_origin_direction(sampleClipXY,
+				        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+				        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+				}
+				Float3 sampleWorldPos = sampleViewZ * reconDir;
 
 				// Geometry weight: binary plane distance test
 				Float planeDist = luisa::compute::abs(
@@ -265,13 +294,31 @@ void RelaxDenoiser::compileHistory(Device& device) {
 		UInt2 gid = block_id().xy();
 		UInt flat_tid = (pixelPos.x % B) + (pixelPos.y % B) * B;
 
-		// Tiles: ViewZ (1 float), DiffFast/DiffNoisy/SpecFast/SpecNoisy (XYZ only, 3 floats each).
-		// Center reads use direct textures (need .w channels; single tap — not the bottleneck).
+		// Block-uniform sky-tile early out BEFORE the cooperative preload
+		// (NRD PRELOAD_INTO_SMEM_WITH_TILE_CHECK pattern; an 8x8 block lies
+		// inside a single 16x16 tile). Bare return — sky texels keep TA's
+		// FLT_MAX/zeros state, which is exactly what next frame's
+		// reprojection gates need to reject them. Only the sky half of the
+		// former combined gate moved up; the per-pixel bounds half must stay
+		// below the preload/sync (edge blocks are not block-uniform and must
+		// not skip the barrier).
+		$if(Expr{ gIn_Tiles.read(pixelPos >> 4u).x != 0.0f }) {
+			$return();
+		};
+
+		// Tiles: ViewZ (1 float) + the four float3 textures packed into three
+		// float4 tiles per cell (R3 wave/smem pass) — same 1872-float total
+		// footprint as the former 4×float3 scalar tiles, but 3 vector
+		// stores/loads per cell instead of 12 scalar ops, and the
+		// consecutive-float4 pattern is bank-conflict-free by construction
+		// (the scalar ×3 layout paid 2-way conflicts on the wrap groups of
+		// the 12-stride tap reads). Per cell:
+		//   A = (dfF.x, dfF.y, dfF.z, dfN.x)  B = (dfN.y, dfN.z, sfF.x, sfF.y)
+		//   C = (sfF.z, sfN.x, sfN.y, sfN.z)
 		Shared<float> viewZTile(TILE_TOTAL);
-		Shared<float> diffFastTile(TILE_TOTAL * 3u);
-		Shared<float> diffNoisyTile(TILE_TOTAL * 3u);
-		Shared<float> specFastTile(TILE_TOTAL * 3u);
-		Shared<float> specNoisyTile(TILE_TOTAL * 3u);
+		Shared<float4> packA(TILE_TOTAL);
+		Shared<float4> packB(TILE_TOTAL);
+		Shared<float4> packC(TILE_TOTAL);
 
 		$for(stage, 3u) {
 			UInt si = flat_tid + stage * BLOCK_TOTAL;
@@ -288,31 +335,19 @@ void RelaxDenoiser::compileHistory(Device& device) {
 				viewZTile.write(si, gIn_ViewZ.read(sp).x);
 
 				Float3 df = io_DiffFast.read(sp).xyz();
-				diffFastTile.write(si * 3u + 0u, df.x);
-				diffFastTile.write(si * 3u + 1u, df.y);
-				diffFastTile.write(si * 3u + 2u, df.z);
-
 				Float3 dn = gIn_DiffNoisy.read(sp).xyz();
-				diffNoisyTile.write(si * 3u + 0u, dn.x);
-				diffNoisyTile.write(si * 3u + 1u, dn.y);
-				diffNoisyTile.write(si * 3u + 2u, dn.z);
-
 				Float3 sf = io_SpecFast.read(sp).xyz();
-				specFastTile.write(si * 3u + 0u, sf.x);
-				specFastTile.write(si * 3u + 1u, sf.y);
-				specFastTile.write(si * 3u + 2u, sf.z);
-
 				Float3 sn = gIn_SpecNoisy.read(sp).xyz();
-				specNoisyTile.write(si * 3u + 0u, sn.x);
-				specNoisyTile.write(si * 3u + 1u, sn.y);
-				specNoisyTile.write(si * 3u + 2u, sn.z);
+				packA.write(si, make_float4(df, dn.x));
+				packB.write(si, make_float4(dn.y, dn.z, sf.x, sf.y));
+				packC.write(si, make_float4(sf.z, sn.x, sn.y, sn.z));
 			};
 		};
 		sync_block();
 
-		// Tile-based early out (after preload — matches AtrousSmem pattern)
-		UInt2 tilePos = pixelPos >> 4u;
-		$if(Expr{ gIn_Tiles.read(tilePos).x != 0.0f } | pixelPos.x >= rectW | pixelPos.y >= rectH) { $return(); };
+		// Out-of-rect threads (bounds half of the former combined gate — kept
+		// after the preload for barrier uniformity).
+		$if(pixelPos.x >= rectW | pixelPos.y >= rectH) { $return(); };
 
 		// Center smem coord (for center viewZ read + 5x5 loop indexing)
 		Int cx = cast<Int>(pixelPos.x) - cast<Int>(gid.x * B) + cast<Int>(BORDER);
@@ -380,39 +415,31 @@ void RelaxDenoiser::compileHistory(Device& device) {
 				Float vz = luisa::compute::abs(viewZTile.read(sIdx));
 
 				$if(inBounds & vz < denoisingRange & vz > 0.0f) {
-					Float3 resp = make_float3(
-						diffFastTile.read(sIdx * 3u + 0u),
-						diffFastTile.read(sIdx * 3u + 1u),
-						diffFastTile.read(sIdx * 3u + 2u));
+					// One vector load per packed tile (see the preload comment)
+					Float4 pa = packA.read(sIdx);
+					Float4 pb = packB.read(sIdx);
+					Float4 pc = packC.read(sIdx);
+					Float3 resp = pa.xyz();
 					Float3 ycocg = make_float3(dot(resp, luisa::make_float3(0.25f, 0.5f, 0.25f)),
 						dot(resp, luisa::make_float3(0.5f, 0.0f, -0.5f)),
 						dot(resp, luisa::make_float3(-0.25f, 0.5f, -0.25f)));
 					rfm = rfm + ycocg;
 					rsm = rsm + ycocg * ycocg;
 
-					Float3 noisy = make_float3(
-						diffNoisyTile.read(sIdx * 3u + 0u),
-						diffNoisyTile.read(sIdx * 3u + 1u),
-						diffNoisyTile.read(sIdx * 3u + 2u));
+					Float3 noisy = make_float3(pa.w, pb.x, pb.y);
 					Float nlum = luminance(noisy);
 					nfm = nfm + noisy;
 					nsmLum = nsmLum + nlum * nlum;
 
 					// Specular YCoCg statistics
-					Float3 sResp = make_float3(
-						specFastTile.read(sIdx * 3u + 0u),
-						specFastTile.read(sIdx * 3u + 1u),
-						specFastTile.read(sIdx * 3u + 2u));
+					Float3 sResp = make_float3(pb.z, pb.w, pc.x);
 					Float3 sycocg = make_float3(dot(sResp, luisa::make_float3(0.25f, 0.5f, 0.25f)),
 						dot(sResp, luisa::make_float3(0.5f, 0.0f, -0.5f)),
 						dot(sResp, luisa::make_float3(-0.25f, 0.5f, -0.25f)));
 					srfm = srfm + sycocg;
 					srsm = srsm + sycocg * sycocg;
 
-					Float3 sNoisy = make_float3(
-						specNoisyTile.read(sIdx * 3u + 0u),
-						specNoisyTile.read(sIdx * 3u + 1u),
-						specNoisyTile.read(sIdx * 3u + 2u));
+					Float3 sNoisy = make_float3(pc.y, pc.z, pc.w);
 					Float snlum = luminance(sNoisy);
 					snfm = snfm + sNoisy;
 					snsmLum = snsmLum + snlum * snlum;
@@ -542,11 +569,13 @@ void RelaxDenoiser::compileHistory(Device& device) {
 		Float niL = luminance(nm);
 		Float tSig = c.gHistoryResetTemporalSigmaScale * luisa::compute::sqrt(luisa::compute::max(0.0f, nsL - niL * niL));
 		Float sSig = c.gHistoryResetSpatialSigmaScale * sigma.x;
-		Float ra = 0.5f * c.gHistoryResetAmount *
+		// NRD diffuse reset has NO 0.5 factor (RELAX_HistoryClamping.cs.hlsl:326;
+		// only the specular variant carries 0.5, :223) and is applied
+		// unconditionally — no historyLength gating (§8.6).
+		Float ra = c.gHistoryResetAmount *
 			luisa::compute::max(0.0f, luisa::compute::abs(dL - niL) - sSig - tSig) /
 			(1.0e-6f + luisa::compute::max(dL, niL) + sSig + tSig);
 		ra = luisa::compute::saturate(ra);
-		ra = ra * ite(historyLength <= c.gHistoryFixFrameNum, 0.0f, 1.0f);
 		ra = ite(c.gDisableAntilag != 0u, 0.0f, ra);
 
 		// Anti-lag reset toward center noisy (NRD: resets both slow AND fast)
@@ -554,7 +583,8 @@ void RelaxDenoiser::compileHistory(Device& device) {
 		oFR = lerp(oFR, fnR, ra); oFG = lerp(oFG, fnG, ra); oFB = lerp(oFB, fnB, ra);
 
 		//----------------------------------------------------------------------
-		// 2nd moment correction
+		// 2nd moment correction (NRD RELAX_HistoryClamping.cs.hlsl:332-334:
+		// max(0, moment + correction) — no artificial floor, §8.5)
 		//----------------------------------------------------------------------
 		Float outL = luminance(make_float3(oR, oG, oB));// oR* lw.x + oG * lw.y + oB * lw.z;
 		Float mc = outL * outL - dL * dL;
@@ -563,8 +593,6 @@ void RelaxDenoiser::compileHistory(Device& device) {
 		// Clamp outputs to non-negative
 		oR = luisa::compute::max(oR, 0.0f); oG = luisa::compute::max(oG, 0.0f); oB = luisa::compute::max(oB, 0.0f);
 		oFR = luisa::compute::max(oFR, 0.0f); oFG = luisa::compute::max(oFG, 0.0f); oFB = luisa::compute::max(oFB, 0.0f);
-		Float outL2 = luminance(make_float3(oR, oG, oB));// oR * lw.x + oG * lw.y + oB * lw.z;
-		c2nd = luisa::compute::max(c2nd, luisa::compute::max(outL2 * outL2 * 0.01f, 0.01f));
 
 		// NRD passthrough (RELAX_HistoryClamping.cs.hlsl:353) — history length written
 		// through unchanged. antilagFactor kept for debug viz only (mode 7).
@@ -725,11 +753,12 @@ void RelaxDenoiser::compileHistory(Device& device) {
 			luisa::compute::sqrt(luisa::compute::max(0.0f,
 				snsmLum * invW - snL * snL));
 		Float sNoisySpatialSig = c.gHistoryResetSpatialSigmaScale * ssigma.x;
+		// NRD specular reset carries the 0.5 factor (RELAX_HistoryClamping.cs.hlsl:223)
+		// and is applied unconditionally — no historyLength gating (§8.6).
 		Float specRA = 0.5f * c.gHistoryResetAmount *
 			luisa::compute::max(0.0f, luisa::compute::abs(sL - snL) - sNoisySpatialSig - sNoisyTemporalSig) /
 			(1.0e-6f + luisa::compute::max(sL, snL) + sNoisySpatialSig + sNoisyTemporalSig);
 		specRA = luisa::compute::saturate(specRA);
-		specRA = specRA * ite(historyLength <= c.gHistoryFixFrameNum, 0.0f, 1.0f);
 		specRA = ite(c.gDisableAntilag != 0u, 0.0f, specRA);
 		// Reset specular toward noisy input
 		Float3 sNoisyCenter = gIn_SpecNoisy.read(pixelPos).xyz();

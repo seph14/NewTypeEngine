@@ -4,7 +4,8 @@ Python utilities shipped alongside the engine. Pure stdlib; no install step.
 
 | File | Purpose |
 |------|---------|
-| `generate_project.py` | Scaffold a new NewTypeEngine VS2022 project from `src/Template.cpp`. |
+| `generate_project.py` | Scaffold a new NewTypeEngine VS2022 project from `src/TemplateDX.cpp` / `src/Template.cpp` — against a prebuilt engine distro (default) or a copied source tree. |
+| `package_dist.py` | Build the `NewTypeEngineLib` static library and assemble the prebuilt win-x64 distro (`--verify` smoke-tests it). |
 | `cinder_blocks.py` | Add / remove / list / update Cinder blocks **and engine addons** in an existing project. |
 | `shader_generator/` | Runtime shader codegen helpers. |
 | `test_cinder_blocks.py` | Tests for `cinder_blocks.py`. Run with `python -m unittest tools.test_cinder_blocks`. |
@@ -50,7 +51,7 @@ manifests (all 83 original tests still pass).
 ### Discovery
 
 `BlockRegistry` walks both the Cinder blocks directory (default
-`C:\Users\barca\Projects\Cinder\blocks`, override via `--blocks-dir` or
+`..\..\Cinder\blocks`, override via `--blocks-dir` or
 `CINDER_BLOCKS_DIR`) **and** the engine addons directory (default
 `<engine>/engine_addons/`, override via `--engine-addons-dir` or
 `NT_ENGINE_ADDONS_DIR`). The Cinder dir is required; the engine addons dir
@@ -99,7 +100,7 @@ A from-scratch port of Cinder's TinderBox block-management logic, adapted for Ne
 ### Prerequisites
 
 - Python 3.10+ (uses `@dataclass` slots, PEP 604 unions).
-- The default Cinder blocks tree is `C:\Users\barca\Projects\Cinder\blocks`. Override per-invocation with `--blocks-dir` or set `CINDER_BLOCKS_DIR` in the environment. This matches `$(CinderRoot)` in `vc2022/*.props`.
+- The default Cinder blocks tree is `..\..\Cinder\blocks`. Override per-invocation with `--blocks-dir` or set `CINDER_BLOCKS_DIR` in the environment. This matches `$(CinderRoot)` in `vc2022/*.props`.
 
 ### Commands
 
@@ -219,7 +220,7 @@ After that, every `add` / `remove` / `update` only rewrites the **property value
 ```json
 {
   "schema_version": 1,
-  "cinder_blocks_dir": "C:/Users/barca/Projects/Cinder/blocks",
+  "cinder_blocks_dir": "../../Cinder/blocks",
   "blocks": {
     "OSC": {
       "block_id": "org.libcinder.osc",
@@ -251,10 +252,10 @@ The same building blocks used by the CLI are importable for custom scripts:
 from tools import cinder_blocks as cb
 
 # Parse one block:
-m = cb.parse_manifest(Path(r"C:\Users\barca\Projects\Cinder\blocks\OSC"))
+m = cb.parse_manifest(Path(r"..\..\Cinder\blocks\OSC"))
 
 # Scan a whole blocks tree:
-reg = cb.BlockRegistry(Path(r"C:\Users\barca\Projects\Cinder\blocks")).scan()
+reg = cb.BlockRegistry(Path(r"..\..\Cinder\blocks")).scan()
 osc = reg.find("org.libcinder.osc")  # by id, name, or folder (case-insensitive)
 
 # Resolve a dependency closure:
@@ -283,18 +284,67 @@ python -m unittest tools.test_cinder_blocks -v
 
 ## `generate_project.py` — project scaffolder
 
-Creates a new VS2022 project from `src/Template.cpp`.
+Creates a new VS2022 project from `src/TemplateDX.cpp` (D3D12 present,
+default) or `src/Template.cpp` (GL present, `--mode gl`).
 
 ```bash
+# Prebuilt engine (default): compile only your App.cpp, link NewTypeEngine.lib
 python tools/generate_project.py --path D:/Projects --name MyDemo
-#   Created: D:/Projects/MyDemo/vc2022/MyDemo.vcxproj
-#   ...
+#   -> resolves the newest dist/NewTypeEngine-*-win-x64 (or pass --engine-root)
+
+# Copy-tree mode: the project owns a private, freely editable engine copy
+python tools/generate_project.py --path D:/Projects --name MyDemo --engine source
+
+# Source mode with static cinder instead of the default DLL link:
+python tools/generate_project.py --path D:/Projects --name MyDemo --engine source --link static
 ```
 
 Generates:
-- `vc2022/MyDemo.sln`, `MyDemo.vcxproj`, `MyDemo.vcxproj.filters`, `MyDemo.props`
-- `src/MyDemoApp.cpp` (renamed from `Template.cpp`)
+- `vc2022/MyDemo.sln`, `MyDemo.vcxproj`, `MyDemo.vcxproj.filters`, `MyDemo.props`,
+  and (source mode) a copy of `EngineCommon.props`
+- `src/MyDemoApp.cpp` (renamed from the template)
 - `include/Resources.h`, `resources/icon.ico`, `assets/{models,textures}/`
 - `Resources.rc`
+- source mode only: `engine/src/newtype/` + `engine/include/newtype/` — a
+  private copy of the whole engine tree the project compiles against, so each
+  project owns an engine it can modify freely. (The vcxproj compiles the
+  curated manifest in `generate_project.py`; extra tree files such as addon
+  sources ride along uncompiled.) Prebuilt mode copies neither the engine
+  tree nor FidelityFX — both resolve inside the distro.
 
-The new project references the engine source via relative paths (`../../src/...`) and inherits the `$(CinderRoot)` / `$(LuisaComputeRoot)` macros from the engine's `vc2022/NewTypeEngine.props`. To add Cinder blocks to the new project, run `cinder_blocks.py add ... --project D:/Projects/MyDemo` after this.
+### `--engine prebuilt|source` (default `prebuilt`)
+
+Prebuilt mode links the packaged `lib/{Debug,Release}/NewTypeEngine.lib`
+(both Debug and Debug_Runtime map to the Debug lib) and imports the distro's
+`props/EngineCommon.props`. Build the distro first with
+`tools/package_dist.py`; `--engine-root` points at an unpacked one
+(default: newest under `dist/`). See `docs/prebuilt_dist.md` for the
+frozen-macro policy — prebuilt consumers must not `/D` any `NT_*` macro
+(a mismatch aborts loudly at startup via the ABI-fingerprint check).
+
+### `--link dll|static` (source mode only, default `dll`)
+
+Controls how the Debug/Release configs link cinder; the choice is baked into
+the generated `.props` (the `@CINDER_LIBS@` placeholder in
+`vc2022/EngineTemplate.props`) and the vcxproj post-build events.
+
+| | `dll` (default) | `static` |
+|---|---|---|
+| `CinderLib*` | `Debug_Shared`/`Release_Shared` import libs (stock cinder) | `Debug_MD`/`Release_MD` static libs (custom cinder fork) |
+| cinder.dll / ANGLE DLLs copied | all configs | no config |
+
+`Debug_Runtime` (shader hot-reload) links exactly like Debug in either mode —
+the runtime shader DLLs reference zero cinder symbols, so no config needs
+shared cinder. Note the DX present path (`--mode dx`, the default) requires
+static cinder: shared cinder does not export the D3D12 renderer, so
+`--link dll` is effectively GL-only. Use `dll` for GL projects against stock
+cinder unless you have built the fork's `Debug_MD` / `Release_MD` configs.
+
+Both modes consume the central compile/link blob from
+`vc2022/EngineCommon.props` (generated — refresh with
+`python tools/generate_project.py --emit-engine-common`); the vcxproj only
+appends project-specific extras. Source-mode projects compile their local
+`engine/` copy (paths like `..\engine\src\newtype\...`) and inherit the
+`$(CinderRoot)` / `$(LuisaComputeRoot)` macros from the generated
+`MyDemo.props`. To add Cinder blocks to the new project, run
+`cinder_blocks.py add ... --project D:/Projects/MyDemo` after this.

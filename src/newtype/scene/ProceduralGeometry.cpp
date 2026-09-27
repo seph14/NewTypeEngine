@@ -113,7 +113,19 @@ ProceduralGeometry::ProceduralGeometry(Device& device) noexcept
                 };
             };
 
-            // Shared memory AABB reduction
+            // Shared memory AABB reduction (R3 wave/smem pass). The tree stops
+            // at 32 partials — exactly one warp — and a single
+            // warp_active_min/max pair replaces the five sub-warp tree steps
+            // and their barriers (lc_optimize §4.5 two-level pattern; min/max
+            // are order-invariant over non-NaN inputs, so the AABB is
+            // bit-identical to a full correct tree for these finite VAT
+            // positions and 1e10 sentinels).
+            // BUG FIX carried by the rewrite: the legacy first step merged
+            // smax with stride +64 at the tid<128 gate (copy-paste from the
+            // next step; smin used the correct +128). Deterministic outcome:
+            // threads 192-255's local maxima never reached the final AABB —
+            // the max side under-covered a quarter of the vertices whenever
+            // the extreme vertex's tid landed there. smin was unaffected.
             Shared<float3> smin(256u);
             Shared<float3> smax(256u);
             smin.write(tid, local_min);
@@ -126,23 +138,19 @@ ProceduralGeometry::ProceduralGeometry(Device& device) noexcept
             sync_block();
             $if(tid < 32u) { smin.write(tid, min(smin.read(tid), smin.read(tid + 32u))); smax.write(tid, max(smax.read(tid), smax.read(tid + 32u))); };
             sync_block();
-            $if(tid < 16u) { smin.write(tid, min(smin.read(tid), smin.read(tid + 16u))); smax.write(tid, max(smax.read(tid), smax.read(tid + 16u))); };
-            sync_block();
-            $if(tid < 8u) { smin.write(tid, min(smin.read(tid), smin.read(tid + 8u))); smax.write(tid, max(smax.read(tid), smax.read(tid + 8u))); };
-            sync_block();
-            $if(tid < 4u) { smin.write(tid, min(smin.read(tid), smin.read(tid + 4u))); smax.write(tid, max(smax.read(tid), smax.read(tid + 4u))); };
-            sync_block();
-            $if(tid < 2u) { smin.write(tid, min(smin.read(tid), smin.read(tid + 2u))); smax.write(tid, max(smax.read(tid), smax.read(tid + 2u))); };
-            sync_block();
 
-            // Thread y==0 concludes AABB
-            $if(tid == 0u) {
-                Float3 final_min = min(smin.read(0u), smin.read(1u));
-                Float3 final_max = max(smax.read(0u), smax.read(1u));
-                Var<AABB> aabb;
-                aabb.packed_min = { final_min.x, final_min.y, final_min.z };
-                aabb.packed_max = { final_max.x, final_max.y, final_max.z };
-                aabbs.write(instance_idx, aabb);
+            // Lanes 0..31 hold the remaining 32 partials; one warp collective
+            // broadcasts the block min/max (diverged lanes 32..255 are simply
+            // excluded from the reduction).
+            $if(tid < 32u) {
+                Float3 block_min = warp_active_min(smin.read(tid));
+                Float3 block_max = warp_active_max(smax.read(tid));
+                $if(tid == 0u) {
+                    Var<AABB> aabb;
+                    aabb.packed_min = { block_min.x, block_min.y, block_min.z };
+                    aabb.packed_max = { block_max.x, block_max.y, block_max.z };
+                    aabbs.write(instance_idx, aabb);
+                };
             };
         });
 }
@@ -401,51 +409,58 @@ void ProceduralGeometry::set_deform_state(uint instance_idx, const ProcDeformSta
 }
 
 void ProceduralGeometry::set_deform_shader_id(luisa::string_view shaderId, uint blockSize) noexcept {
-    _deformShaderId = shaderId;
+    _deformShader.assign(shaderId);
     _deformShaderBlock = blockSize;
 }
 
-ProceduralGeometry::VATLoadResult
+luisa::vector<ProceduralGeometry::VATLoadResult>
 ProceduralGeometry::add_vat_from_file(const std::filesystem::path& path) noexcept {
     LUISA_ASSERT(!_built, "Cannot add VAT mesh after build()");
 
-    // Load VAT file (include texcoords for UV packing)
-    auto vat_data = VATLoader::load(path, /*skip_texcoords=*/false);
-    if (!vat_data.is_valid()) {
-        return {~0u, 0u, 0u, 0u};
-    }
+    luisa::vector<VATLoadResult> results;
 
-    // Convert indices to Triangle array
-    uint32_t tri_count = vat_data.index_count / 3u;
-    luisa::vector<compute::Triangle> triangles(tri_count);
-    for (uint32_t t = 0; t < tri_count; ++t) {
-        triangles[t] = compute::Triangle{
-            vat_data.indices[t * 3u], vat_data.indices[t * 3u + 1u], vat_data.indices[t * 3u + 2u]};
-    }
+    // Load VAT file (include texcoords for UV packing); V1 packed files yield
+    // one VATData per topology, V0 files yield a single one
+    auto topologies = VATLoader::load_all(path, /*skip_texcoords=*/false);
+    if (topologies.empty())
+        return results;
 
-    // Convert flat texcoords [vertex_count * 2] to float2 array
-    luisa::vector<luisa::float2> uvs;
-    if (!vat_data.texcoords.empty()) {
-        uvs.resize(vat_data.vertex_count);
-        for (uint32_t v = 0u; v < vat_data.vertex_count; ++v) {
-            uvs[v] = luisa::make_float2(
-                vat_data.texcoords[v * 2u], vat_data.texcoords[v * 2u + 1u]);
+    results.reserve(topologies.size());
+    for (auto& vat_data : topologies) {
+        // Convert indices to Triangle array
+        uint32_t tri_count = vat_data.index_count / 3u;
+        luisa::vector<compute::Triangle> triangles(tri_count);
+        for (uint32_t t = 0; t < tri_count; ++t) {
+            triangles[t] = compute::Triangle{
+                vat_data.indices[t * 3u], vat_data.indices[t * 3u + 1u], vat_data.indices[t * 3u + 2u]};
         }
+
+        // Convert flat texcoords [vertex_count * 2] to float2 array
+        luisa::vector<luisa::float2> uvs;
+        if (!vat_data.texcoords.empty()) {
+            uvs.resize(vat_data.vertex_count);
+            for (uint32_t v = 0u; v < vat_data.vertex_count; ++v) {
+                uvs[v] = luisa::make_float2(
+                    vat_data.texcoords[v * 2u], vat_data.texcoords[v * 2u + 1u]);
+            }
+        }
+
+        uint mesh_id = add_vat_mesh(
+            luisa::span<const luisa::float3>{vat_data.positions.data(), vat_data.positions.size()},
+            luisa::span<const luisa::float3>{vat_data.normals.data(), vat_data.normals.size()},
+            luisa::span<const compute::Triangle>{triangles.data(), triangles.size()},
+            vat_data.vertex_count, vat_data.frame_count,
+            uvs.empty() ? luisa::span<const luisa::float2>{} :
+                luisa::span<const luisa::float2>{uvs.data(), uvs.size()});
+
+        CI_LOG_D("ProceduralGeometry: Loaded VAT " << path.filename().string()
+                 << " verts:" << vat_data.vertex_count << " frames:" << vat_data.frame_count
+                 << " tris:" << tri_count);
+
+        results.push_back(VATLoadResult{mesh_id, vat_data.vertex_count, vat_data.frame_count, tri_count});
     }
 
-    uint mesh_id = add_vat_mesh(
-        luisa::span<const luisa::float3>{vat_data.positions.data(), vat_data.positions.size()},
-        luisa::span<const luisa::float3>{vat_data.normals.data(), vat_data.normals.size()},
-        luisa::span<const compute::Triangle>{triangles.data(), triangles.size()},
-        vat_data.vertex_count, vat_data.frame_count,
-        uvs.empty() ? luisa::span<const luisa::float2>{} :
-            luisa::span<const luisa::float2>{uvs.data(), uvs.size()});
-
-    CI_LOG_I("ProceduralGeometry: Loaded VAT " << path.filename().string()
-             << " verts:" << vat_data.vertex_count << " frames:" << vat_data.frame_count
-             << " tris:" << tri_count);
-
-    return {mesh_id, vat_data.vertex_count, vat_data.frame_count, tri_count};
+    return results;
 }
 
 void ProceduralGeometry::build(Stream& stream) noexcept {
@@ -712,105 +727,6 @@ void ProceduralGeometry::build(Stream& stream) noexcept {
         // Create deform state buffer
         _deformStateBuffer = _device.create_buffer<ProcDeformState>(_deformInstanceCount);
         stream << _deformStateBuffer.copy_from(_deformStateCPU.data());
-
-        // Compile deformation shader (default: wind)
-        uint deform_start_val = _deformStartIdx;
-        _deformShader = _device.compile<1>(
-            [vat_count, deform_start_val](BufferVar<luisa::float4> positions,
-               BufferVar<luisa::float4> normals,
-               BufferVar<AABB> aabbs,
-               BufferVar<ProcInstanceData> instances,
-               BufferVar<ProcDeformState> states,
-               BufferVar<luisa::float3> base_positions,
-               BufferVar<luisa::float3> base_normals,
-               BufferVar<uint> base_offsets,
-               BufferVar<compute::Triangle> indices,
-               BufferVar<luisa::float2> static_uvs,
-               BufferVar<ProcMeshMeta> mesh_meta) noexcept {
-                UInt deform_idx = dispatch_id().x;
-                UInt idx = deform_start_val + deform_idx;
-                Var<ProcInstanceData> inst = instances.read(idx);
-
-                Var<ProcDeformState> state = states.read(deform_idx);
-                Float time_val = state.params[0].x;
-                Float strength = state.params[0].y;
-                Float freq = state.params[0].z;
-
-                UInt base_offset = base_offsets.read(inst.mesh_id - vat_count);
-                Var<ProcMeshMeta> meta = mesh_meta.read(inst.mesh_id);
-                UInt frame_idx = cast<UInt>(inst.param);
-                UInt pos_base = inst.packed_offsets & 0xFFFFu;
-                UInt idx_base = inst.packed_offsets >> 16u;
-
-                Float3 aabb_min = make_float3(1e10f);
-                Float3 aabb_max = make_float3(-1e10f);
-
-                // --- Pass 1: Deform vertices, pack uv_u into position.w ---
-                $for(v, inst.vertex_count) {
-                    Float3 base_pos = base_positions.read(base_offset + v);
-                    Float bend = base_pos.y * strength *
-                        sin(time_val * freq + base_pos.x * 0.5f + frame_idx * 0.3f);
-                    Float3 deformed = make_float3(
-                        base_pos.x + bend,
-                        base_pos.y,
-                        base_pos.z + bend * 0.3f);
-                    Float2 uv = static_uvs.read(meta.uv_base + v);
-                    positions.write(pos_base + v, make_float4(deformed, uv.x));
-                    aabb_min = min(aabb_min, deformed);
-                    aabb_max = max(aabb_max, deformed);
-                };
-
-                // --- Pass 2: Zero normals for accumulation ---
-                $for(v, inst.vertex_count) {
-                    normals.write(pos_base + v, make_float4(0.0f));
-                };
-
-                // --- Pass 3: Accumulate angle-weighted face normals ---
-                $for(t, inst.tri_count) {
-                    auto tri = indices.read(idx_base + t);
-                    Float3 p0 = positions.read(pos_base + tri.i0).xyz();
-                    Float3 p1 = positions.read(pos_base + tri.i1).xyz();
-                    Float3 p2 = positions.read(pos_base + tri.i2).xyz();
-                    Float3 e1 = p1 - p0;
-                    Float3 e2 = p2 - p0;
-                    Float3 fn = cross(e1, e2);
-                    Float area = length(fn);
-                    $if(area > 1e-8f) {
-                        Float3 n = fn / area;
-                        // Angle at p0
-                        Float cos_a = dot(normalize(e1), normalize(e2));
-                        Float3 prev0 = normals.read(pos_base + tri.i0).xyz();
-                        normals.write(pos_base + tri.i0,
-                            make_float4(prev0 + n * acos(clamp(cos_a, -1.0f, 1.0f)), 0.0f));
-                        // Angle at p1
-                        Float3 e1b = p0 - p1;
-                        Float3 e2b = p2 - p1;
-                        Float cos_b = dot(normalize(e1b), normalize(e2b));
-                        Float3 prev1 = normals.read(pos_base + tri.i1).xyz();
-                        normals.write(pos_base + tri.i1,
-                            make_float4(prev1 + n * acos(clamp(cos_b, -1.0f, 1.0f)), 0.0f));
-                        // Angle at p2
-                        Float3 e1c = p0 - p2;
-                        Float3 e2c = p1 - p2;
-                        Float cos_c = dot(normalize(e1c), normalize(e2c));
-                        Float3 prev2 = normals.read(pos_base + tri.i2).xyz();
-                        normals.write(pos_base + tri.i2,
-                            make_float4(prev2 + n * acos(clamp(cos_c, -1.0f, 1.0f)), 0.0f));
-                    };
-                };
-
-                // --- Pass 4: Normalize + pack uv_v into normal.w ---
-                $for(v, inst.vertex_count) {
-                    Float3 n = normals.read(pos_base + v).xyz();
-                    Float2 uv = static_uvs.read(meta.uv_base + v);
-                    normals.write(pos_base + v, make_float4(normalize(n), uv.y));
-                };
-
-                Var<AABB> aabb;
-                aabb.packed_min = { aabb_min.x, aabb_min.y, aabb_min.z };
-                aabb.packed_max = { aabb_max.x, aabb_max.y, aabb_max.z };
-                aabbs.write(idx, aabb);
-            });
     }
 
     // --- Create GPU buffers ---
@@ -828,6 +744,31 @@ void ProceduralGeometry::build(Stream& stream) noexcept {
     for (uint i = 0; i < _instanceCount; ++i) {
         if (_instances_cpu[i].type != 0u) {
             cpu_aabbs[i] = _builtinAabbs[i];
+        }
+    }
+    // No deform shader id: type-3 instances keep the rest-pose base mesh that
+    // was uploaded above — give them static rest AABBs (collapsed when the
+    // initial state hides the instance, same protocol the shader implements).
+    // With a shader id the initial deform dispatch below overwrites these.
+    if (_has_deform && !_deformShader.is_set()) {
+        luisa::vector<AABB> rest_aabb(_deformMeshes.size());
+        for (uint m = 0u; m < _deformMeshes.size(); ++m) {
+            const auto& dm = _deformMeshes[m];
+            luisa::float3 bmin(1e10f), bmax(-1e10f);
+            for (const auto& p : dm.positions_cpu) {
+                bmin = luisa::min(bmin, p);
+                bmax = luisa::max(bmax, p);
+            }
+            rest_aabb[m].packed_min = { bmin.x, bmin.y, bmin.z };
+            rest_aabb[m].packed_max = { bmax.x, bmax.y, bmax.z };
+        }
+        for (uint i = _deformStartIdx; i < _instanceCount; ++i) {
+            const auto& inst = _instances_cpu[i];
+            cpu_aabbs[i] = rest_aabb[inst.mesh_id - vat_count];
+            if (_deformStateCPU[i - _deformStartIdx].params[0].w < 0.f) {
+                cpu_aabbs[i].packed_min = { 1e30f, 1e30f, 1e30f };
+                cpu_aabbs[i].packed_max = { -1e30f, -1e30f, -1e30f };
+            }
         }
     }
     stream << _aabbBuffer.copy_from(cpu_aabbs.data());
@@ -859,42 +800,25 @@ void ProceduralGeometry::build(Stream& stream) noexcept {
             .dispatch(vat_instance_count, 256u);
     } else _vatDispatchBuf = _device.create_buffer<uint>(1u);
 
-    // Run deform shader for initial deformed positions + AABBs (type=3)
-    if (_has_deform) {
-        ProcDeformState initial_state{};
-        initial_state.params[0] = luisa::make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // Run the deform shader for initial deformed positions + AABBs (type=3).
+    // Without a shader id the instances simply keep the rest-pose upload above.
+    if (_has_deform && _deformShader.is_set()) {
         if (_deformInstanceCount > 0u) {
             _deformStateCPU[0].params[0].x = 0.0f;
             stream << _deformStateBuffer.view(0u, 1u).copy_from(&_deformStateCPU[0]);
         }
 
-        if (_deformShaderId.empty()) {
-            stream << _deformShader(
-                _vatPositions, _vatNormals,
-                _aabbBuffer, _instanceBuffer,
-                _deformStateBuffer, _deformBasePositions, _deformBaseNormals,
-                _deformBaseOffsets, _vatIndices, _procUVs, _procMeshMeta)
-                .dispatch(_deformInstanceCount);
-        } else {
-            stream << core::ShaderManager::instance().shader<2,
-                Buffer<luisa::float4>,
-                Buffer<luisa::float4>,
-                Buffer<AABB>,
-                Buffer<ProcInstanceData>,
-                Buffer<ProcDeformState>,
-                Buffer<luisa::float3>,
-                Buffer<luisa::float3>,
-                Buffer<uint>,
-                Buffer<compute::Triangle>,
-                Buffer<luisa::float2>,
-                Buffer<ProcMeshMeta>>(
-                _deformShaderId,
-                _vatPositions, _vatNormals,
-                _aabbBuffer, _instanceBuffer,
-                _deformStateBuffer, _deformBasePositions, _deformBaseNormals,
-                _deformBaseOffsets, _vatIndices, _procUVs, _procMeshMeta)
-                .dispatch(_deformInstanceCount, _deformShaderBlock);
-        }
+        stream << core::ShaderManager::instance().shader(
+            _deformShader,
+            _vatPositions, _vatNormals,
+            _aabbBuffer, _instanceBuffer,
+            _deformStateBuffer, _deformBasePositions, _deformBaseNormals,
+            _deformBaseOffsets, _vatIndices, _procUVs, _procMeshMeta)
+            .dispatch(_deformInstanceCount, _deformShaderBlock);
+    } else if (_has_deform) {
+        CI_LOG_W("ProceduralGeometry: " << _deformInstanceCount
+            << " deformable instance(s) without set_deform_shader_id() - "
+               "rendering the rest-pose mesh (no per-frame deformation)");
     }
 
     // Create ProceduralPrimitive with the AABB buffer
@@ -938,8 +862,9 @@ bool ProceduralGeometry::update(Stream& stream, float time) noexcept {
         }
     }
 
-    // Deformable instances always update (wind changes every frame)
-    if (_has_deform) {
+    // Deformable instances update every frame when a deform shader is set
+    // (rest-pose fallback instances are static — no forced refit)
+    if (_has_deform && _deformShader.is_set()) {
         any_changed = true;
     }
 
@@ -981,36 +906,16 @@ bool ProceduralGeometry::update(Stream& stream, float time) noexcept {
     }
 
     // Deform pass: update shared time state, then run deform shader
-    if (_has_deform) {
+    if (_has_deform && _deformShader.is_set()) {
         profiler.set_pass("Proc/Deform");
 
-        if (_deformShaderId.empty()) {
-            stream << _deformShader(
+        stream << core::ShaderManager::instance().shader(
+                _deformShader,
                 _vatPositions, _vatNormals,
                 _aabbBuffer, _instanceBuffer,
                 _deformStateBuffer, _deformBasePositions, _deformBaseNormals,
                 _deformBaseOffsets, _vatIndices, _procUVs, _procMeshMeta)
-                .dispatch(_deformInstanceCount);
-        } else {
-            stream << core::ShaderManager::instance().shader<2,
-                Buffer<luisa::float4>,
-                Buffer<luisa::float4>,
-                Buffer<AABB>,
-                Buffer<ProcInstanceData>,
-                Buffer<ProcDeformState>,
-                Buffer<luisa::float3>,
-                Buffer<luisa::float3>,
-                Buffer<uint>,
-                Buffer<compute::Triangle>,
-                Buffer<luisa::float2>,
-                Buffer<ProcMeshMeta>>(
-                    _deformShaderId,
-                    _vatPositions, _vatNormals,
-                    _aabbBuffer, _instanceBuffer,
-                    _deformStateBuffer, _deformBasePositions, _deformBaseNormals,
-                    _deformBaseOffsets, _vatIndices, _procUVs, _procMeshMeta)
                 .dispatch(_deformInstanceCount, _deformShaderBlock);
-        }
     }
 
     profiler.set_pass("Proc/BLAS");

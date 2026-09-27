@@ -51,6 +51,15 @@ namespace newtype::util {
 		void end_cpu_pass	();
 		void end_cpu_frame	();
 
+		// Perf-harness accessors (perf review R2 item 1): last frame's raw
+		// per-stream GPU scopes (empty without NT_ENABLE_VALIDATION — GPU
+		// per-pass timing rides the validation DLL by design) and the CPU
+		// pass-timing map, for CSV export by the --perf harness.
+		[[nodiscard]] const luisa::unordered_map<uint64_t, luisa::compute::StreamStats>&
+			last_gpu_stats() const noexcept { return _res; }
+		[[nodiscard]] const luisa::unordered_map<luisa::string, double>&
+			cpu_timings() const noexcept { return _cpuTimings; }
+
 	protected:
 		Profiler();
 		~Profiler();

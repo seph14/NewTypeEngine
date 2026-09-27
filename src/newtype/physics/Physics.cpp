@@ -165,11 +165,11 @@ struct Physics::Impl {
     // legitimately has regions facing any direction.
     // Tangents/UVs are preserved from the existing buffer contents.
     compute::Shader<1,
-        compute::BufferView<float3>,   // lcs_pos (src positions)
-        compute::BufferView<Vertex>,   // next_vertex_buffer (dst)
-        compute::BufferView<uint>,     // adj_offsets
-        compute::BufferView<uint3>,    // adj_tris (i0,i1,i2 per adjacent triangle)
-        uint>                          // vertex count
+        compute::BufferView<float3>,              // lcs_pos (src positions)
+        compute::BufferView<util::ActiveVertex>,  // next_vertex_buffer (dst)
+        compute::BufferView<uint>,                // adj_offsets
+        compute::BufferView<uint3>,               // adj_tris (i0,i1,i2 per adjacent triangle)
+        uint>                                     // vertex count
         copy_positions;
 };
 
@@ -201,14 +201,14 @@ Physics::Physics()
     // normals from the deformed positions via the adjacency lists.
     _impl->copy_positions = device.compile<1>(
         [](compute::Var<compute::BufferView<float3>> lcs_pos,
-           compute::Var<compute::BufferView<Vertex>>  next_verts,
+           compute::Var<compute::BufferView<util::ActiveVertex>> next_verts,
            compute::Var<compute::BufferView<uint>>    adj_offsets,
            compute::Var<compute::BufferView<uint3>>   adj_tris,
            compute::UInt                              n) {
             compute::set_block_size(256u);
             compute::UInt i = compute::dispatch_x();
             $if (i < n) {
-                compute::Var<Vertex> v = next_verts.read(i);
+                compute::Var<util::ActiveVertex> v = next_verts.read(i);
                 compute::Var<float3> p = lcs_pos.read(i);
                 v.px = p.x;  v.py = p.y;  v.pz = p.z;
 
@@ -225,7 +225,7 @@ Physics::Physics()
                     n_sum = n_sum + compute::cross(p1 - p0, p2 - p0);
                 };
                 compute::Var<float3> normal = compute::normalize(n_sum);
-                v.nx = normal.x;  v.ny = normal.y;  v.nz = normal.z;
+                util::vertex_set_normal(v, normal);
 
                 next_verts.write(i, v);
             };

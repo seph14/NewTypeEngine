@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  EngineCommon.props — centralized NewTypeEngine compile/link settings.
+
+  GENERATED FILE — do not hand-edit. Regenerate with:
+      python tools/generate_project.py  (emit EngineCommon flag)
+  (tools/generate_project.py:engine_common_props_text() is the source.)
+
+  Provides, for the Debug / Debug_Runtime / Release configurations:
+    - the full preprocessor define blob (Cinder/LuisaCompute/EASTL/fmt/...),
+    - the engine + dependency include directories,
+    - common compiler options (C++20, /utf-8, /Zc, warnings, /MP),
+    - config-keyed link-dependency macros ($(EngineLinkDepsDebug/Release)).
+
+  Import after Microsoft.Cpp.props (before the per-config user sheets) and
+  append project-specific entries with %(PreprocessorDefinitions) /
+  %(AdditionalIncludeDirectories) / %(AdditionalDependencies) inheritance.
+
+  Dependency roots are Condition='' overridable: set CinderRoot /
+  LuisaComputeRoot / FidelityFXRoot / NewTypeEngineRoot / NewTypeEngineInclude
+  in an earlier props file to repoint them (e.g. at local checkouts). The
+  defaults resolve relative to this sheet's own location, which for a
+  packaged distro (<distro>/props/EngineCommon.props) is:
+      <distro>/include, <distro>/deps/Cinder, <distro>/deps/LuisaCompute, ...
+  Debug and Debug_Runtime intentionally share one define set and one link
+  set: the prebuilt Debug library serves both consumers (RT_RUNTIME is a
+  consumer-side behavioral define appended by the importing project, never
+  a layout-affecting one — see docs/prebuilt_dist.md).
+-->
+<Project>
+  <PropertyGroup>
+    <!-- Overridable roots (first definition wins; set before importing) -->
+    <NewTypeEngineRoot Condition="'$(NewTypeEngineRoot)' == ''">$(MSBuildThisFileDirectory)..</NewTypeEngineRoot>
+    <NewTypeEngineInclude Condition="'$(NewTypeEngineInclude)' == ''">$(NewTypeEngineRoot)\include</NewTypeEngineInclude>
+    <CinderRoot Condition="'$(CinderRoot)' == ''">$(MSBuildThisFileDirectory)..\deps\Cinder</CinderRoot>
+    <CinderInclude Condition="'$(CinderInclude)' == ''">$(CinderRoot)\include</CinderInclude>
+    <CinderIncludeAngle Condition="'$(CinderIncludeAngle)' == ''">$(CinderRoot)\include\ANGLE</CinderIncludeAngle>
+    <!-- Static cinder libs with dynamic CRT (/MDd //MD), built from the
+         cinder fork's Debug_MD // Release_MD configs. Shared cinder is not
+         used by the engine (the D3D12 renderer is not exported from
+         cinder.dll); "link dll" source-mode projects override these. -->
+    <CinderLibDebug Condition="'$(CinderLibDebug)' == ''">$(CinderRoot)\lib\msw\x64\Debug_MD\v143\cinder.lib</CinderLibDebug>
+    <CinderLibRelease Condition="'$(CinderLibRelease)' == ''">$(CinderRoot)\lib\msw\x64\Release_MD\v143\cinder.lib</CinderLibRelease>
+    <LuisaComputeRoot Condition="'$(LuisaComputeRoot)' == ''">$(MSBuildThisFileDirectory)..\deps\LuisaCompute</LuisaComputeRoot>
+    <LuisaComputeInclude Condition="'$(LuisaComputeInclude)' == ''">$(LuisaComputeRoot)\include</LuisaComputeInclude>
+    <LuisaComputeSpdlog Condition="'$(LuisaComputeSpdlog)' == ''">$(LuisaComputeRoot)\src\ext\spdlog\include</LuisaComputeSpdlog>
+    <LuisaComputeXxHash Condition="'$(LuisaComputeXxHash)' == ''">$(LuisaComputeRoot)\src\ext\xxHash</LuisaComputeXxHash>
+    <LuisaComputeMagicEnum Condition="'$(LuisaComputeMagicEnum)' == ''">$(LuisaComputeRoot)\src\ext\magic_enum\include</LuisaComputeMagicEnum>
+    <LuisaComputeEASTL Condition="'$(LuisaComputeEASTL)' == ''">$(LuisaComputeRoot)\src\ext\EASTL\include</LuisaComputeEASTL>
+    <LuisaComputeEABase Condition="'$(LuisaComputeEABase)' == ''">$(LuisaComputeRoot)\src\ext\EASTL\packages\EABase\include\Common</LuisaComputeEABase>
+    <LuisaComputeReproc Condition="'$(LuisaComputeReproc)' == ''">$(LuisaComputeRoot)\src\ext\reproc\reproc\include</LuisaComputeReproc>
+    <LuisaComputeReprocXX Condition="'$(LuisaComputeReprocXX)' == ''">$(LuisaComputeRoot)\src\ext\reproc\reproc++\include</LuisaComputeReprocXX>
+    <LuisaComputeMarl Condition="'$(LuisaComputeMarl)' == ''">$(LuisaComputeRoot)\src\ext\marl\include</LuisaComputeMarl>
+    <LuisaComputeHalf Condition="'$(LuisaComputeHalf)' == ''">$(LuisaComputeRoot)\src\ext\half\include</LuisaComputeHalf>
+    <LuisaComputeStb Condition="'$(LuisaComputeStb)' == ''">$(LuisaComputeRoot)\src\ext\stb</LuisaComputeStb>
+    <LuisaComputeLibDebug Condition="'$(LuisaComputeLibDebug)' == ''">$(LuisaComputeRoot)\build-dx-debug\lib\</LuisaComputeLibDebug>
+    <LuisaComputeLibRelease Condition="'$(LuisaComputeLibRelease)' == ''">$(LuisaComputeRoot)\build-dx\lib\</LuisaComputeLibRelease>
+    <LuisaComputeBinDebug Condition="'$(LuisaComputeBinDebug)' == ''">$(LuisaComputeRoot)\build-dx-debug\bin</LuisaComputeBinDebug>
+    <LuisaComputeBinRelease Condition="'$(LuisaComputeBinRelease)' == ''">$(LuisaComputeRoot)\build-dx\bin</LuisaComputeBinRelease>
+    <FidelityFXRoot Condition="'$(FidelityFXRoot)' == ''">$(MSBuildThisFileDirectory)..\deps\FidelityFX</FidelityFXRoot>
+    <FidelityFXInclude Condition="'$(FidelityFXInclude)' == ''">$(FidelityFXRoot)\include</FidelityFXInclude>
+    <FidelityFXBin Condition="'$(FidelityFXBin)' == ''">$(FidelityFXRoot)\bin</FidelityFXBin>
+    <DlssRoot Condition="'$(DlssRoot)' == ''">$(MSBuildThisFileDirectory)..\deps\NVIDIA\DLSS</DlssRoot>
+    <DlssInclude Condition="'$(DlssInclude)' == ''">$(DlssRoot)\include</DlssInclude>
+    <DlssLibDebug Condition="'$(DlssLibDebug)' == ''">$(DlssRoot)\lib\x64\nvsdk_ngx_d_dbg.lib</DlssLibDebug>
+    <DlssLibRelease Condition="'$(DlssLibRelease)' == ''">$(DlssRoot)\lib\x64\nvsdk_ngx_d.lib</DlssLibRelease>
+    <DlssBin Condition="'$(DlssBin)' == ''">$(DlssRoot)\bin</DlssBin>
+    <SteamAudioRoot Condition="'$(SteamAudioRoot)' == ''">$(MSBuildThisFileDirectory)..\deps\Valve\SteamAudio</SteamAudioRoot>
+    <SteamAudioInclude Condition="'$(SteamAudioInclude)' == ''">$(SteamAudioRoot)\include</SteamAudioInclude>
+    <SteamAudioLib Condition="'$(SteamAudioLib)' == ''">$(SteamAudioRoot)\lib\x64\phonon.lib</SteamAudioLib>
+    <SteamAudioBin Condition="'$(SteamAudioBin)' == ''">$(SteamAudioRoot)\bin</SteamAudioBin>
+    <!-- System libs every linking project needs (Recorder/MovieWriter -> MF;
+         media decode -> D3D11; always-safe Windows system libs) -->
+    <EngineSystemLibs>d3d12.lib;d3d11.lib;dxgi.lib;dxguid.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;dbghelp.lib</EngineSystemLibs>
+    <!-- The six LuisaCompute import libs (shared DLLs — plugin-scan backends
+         and the shader hot-reload boundary need one shared copy). Used alone
+         by the runtime shader DLL projects. -->
+    <EngineLuisaLibsDebug>$(LuisaComputeLibDebug)\luisa-dsl.lib;$(LuisaComputeLibDebug)\luisa-xir.lib;$(LuisaComputeLibDebug)\luisa-osl.lib;$(LuisaComputeLibDebug)\luisa-runtime.lib;$(LuisaComputeLibDebug)\luisa-ast.lib;$(LuisaComputeLibDebug)\luisa-core.lib</EngineLuisaLibsDebug>
+    <EngineLuisaLibsRelease>$(LuisaComputeLibRelease)\luisa-dsl.lib;$(LuisaComputeLibRelease)\luisa-xir.lib;$(LuisaComputeLibRelease)\luisa-osl.lib;$(LuisaComputeLibRelease)\luisa-runtime.lib;$(LuisaComputeLibRelease)\luisa-ast.lib;$(LuisaComputeLibRelease)\luisa-core.lib</EngineLuisaLibsRelease>
+    <!-- Full link set for exe/lib projects: cinder + system + luisa + the
+         NGX stub (config-keyed: _d = /MD release CRT, _d_dbg = /MDd debug). -->
+    <EngineLinkDepsDebug>$(CinderLibDebug);$(EngineSystemLibs);$(EngineLuisaLibsDebug);$(DlssLibDebug);$(SteamAudioLib)</EngineLinkDepsDebug>
+    <EngineLinkDepsRelease>$(CinderLibRelease);$(EngineSystemLibs);$(EngineLuisaLibsRelease);$(DlssLibRelease);$(SteamAudioLib)</EngineLinkDepsRelease>
+    <PlatformToolset Condition="'$(PlatformToolset)' == ''">v143</PlatformToolset>
+  </PropertyGroup>
+  <!-- Debug + Debug_Runtime share one blob (the prebuilt Debug lib serves
+       both; importers append RT_RUNTIME for Debug_Runtime). -->
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Debug' or '$(Configuration)' == 'Debug_Runtime'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>$(NewTypeEngineInclude);$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(FidelityFXInclude);$(DlssInclude);$(SteamAudioInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0601;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;NTDDI_VERSION=0x06010000;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <DisableSpecificWarnings>4244;4267;4068;5105</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)' == 'Release'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>$(NewTypeEngineInclude);$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(FidelityFXInclude);$(DlssInclude);$(SteamAudioInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0601;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;NTDDI_VERSION=0x06010000;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <DisableSpecificWarnings>4244;4267;4068;5105</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>

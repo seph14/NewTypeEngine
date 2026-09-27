@@ -19,7 +19,7 @@ LuisaGLInterop::LuisaGLInterop(const ci::gl::Texture2dRef& texture, unsigned int
         cudaGraphicsGLRegisterImage(&_resource_handle, _textureId, _target, flags),
         "cudaGraphicsGLRegisterImage");
 
-    CI_LOG_I("LuisaGLInterop: Registered GL texture " << _textureId <<
+    CI_LOG_D("LuisaGLInterop: Registered GL texture " << _textureId <<
              " (target: 0x" << std::hex << _target << std::dec << ") with CUDA");
 }
 
@@ -34,7 +34,7 @@ LuisaGLInterop::LuisaGLInterop(GLuint textureId, GLenum target, unsigned int fla
         cudaGraphicsGLRegisterImage(&_resource_handle, _textureId, _target, flags),
         "cudaGraphicsGLRegisterImage");
 
-    CI_LOG_I("LuisaGLInterop: Registered GL texture " << _textureId <<
+    CI_LOG_D("LuisaGLInterop: Registered GL texture " << _textureId <<
              " (target: 0x" << std::hex << _target << std::dec << ") with CUDA");
 }
 

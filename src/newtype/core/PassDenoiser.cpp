@@ -32,8 +32,7 @@ void RelaxDenoiser::compile(Device& device, const SurfaceResolverPoly& resolver)
 	compileHistory(device);
 	compileAtrous(device);
 	compileAtrousSmem(device);
-	compileUtility(device);
-	_relaxMotionCopy = device.compile<2>(
+	compileUtility(device);	_relaxMotionCopy = device.compile<2>(
 		[](ImageFloat raster_depth, ImageUInt gbuf_vis, ImageFloat gbuf_bary_motion) noexcept {
 		set_name("relax_motion_copy");
 		UInt2 coord = dispatch_id().xy();
@@ -60,6 +59,20 @@ void RelaxDenoiser::compile(Device& device, const SurfaceResolverPoly& resolver)
 
 void RelaxDenoiser::recompileCallables(Device& device, const SurfaceResolverPoly& resolver) {
 	compilePrefilterAndClassifyTiles(device, resolver);
+}
+
+void RelaxDenoiser::recompileProjectionKernels(Device& device) {
+	// The projection-sensitive kernels bake _bakedProjection as a C++
+	// constant at trace time (§9 perf investigation: perspective must keep
+	// the pre-projection instruction sequence). These are the resolver-free
+	// kernels recompileCallables deliberately skips — pure functions of the
+	// baked tag, so a projection flip rebuilds exactly these. Revisited
+	// projections hit the shader disk cache.
+	compilePrepass(device);
+	compileHitAndTemporal(device);
+	compileHistory(device);
+	compileAtrous(device);
+	compileAtrousSmem(device);
 }
 
 //==========================================================================
@@ -91,9 +104,6 @@ void RelaxDenoiser::createImages(Device& device, uint width, uint height) {
 		_relaxSpecHitDistPrev[i].set_name("relax_specd_prev" + ci::toString(i));
 	}
 
-	_relaxSpecHitDistSmoothed = device.create_image<float>(PixelStorage::HALF1, width, height);
-	_relaxSpecHitDistSmoothed.set_name("relax_spec_dist");
-
 	uint tileW = (width + 15u) / 16u;
 	uint tileH = (height + 15u) / 16u;
 	_relaxTiles = device.create_image<float>(PixelStorage::BYTE2, tileW, tileH);
@@ -102,17 +112,39 @@ void RelaxDenoiser::createImages(Device& device, uint width, uint height) {
 	for (int i = 0; i < 2; i++) {
 		_relaxDiff[i]  = device.create_image<float>(PixelStorage::HALF4, width, height);
 		_relaxSpec[i]  = device.create_image<float>(PixelStorage::HALF4, width, height);
-		
-		_relaxSpecHitDistSmoothed.set_name("relax_diff" + ci::toString(i));
-		_relaxSpecHitDistSmoothed.set_name("relax_spec" + ci::toString(i));
+
+		_relaxDiff[i].set_name("relax_diff" + ci::toString(i));
+		_relaxSpec[i].set_name("relax_spec" + ci::toString(i));
 	}
 
 	_relaxDiffFast      = device.create_image<float>(PixelStorage::HALF4, width, height);
 	_relaxSpecFast      = device.create_image<float>(PixelStorage::HALF4, width, height);
 	_relaxHistoryLength = device.create_image<float>(PixelStorage::HALF1, width, height);
 
+	// Split-kernel VMB prepass outputs (single-buffered, same-frame consumers).
+	// FLOAT4 (not HALF): prevUV_vmb/curvature feed threshold tests where fp16
+	// quantization would add gate noise on top of the compiler-hazard history;
+	// Info2.z transports the min-3x3 hitDist, which must stay fp32-exact so TA's
+	// output matches its former direct min computation bit-for-bit.
+	// FetchA/B/C are written/read only for pixels whose VMB footprint test
+	// passed (TA reads them inside its found-gate) — failed-VMB pixels carry
+	// no fetch traffic at all. FetchA/B/C are HALF4, which halves the
+	// found-pixel traffic at upstream-equivalent precision (NRD keeps these
+	// quantities in RGBA16F/R16F histories).
+	constexpr PixelStorage vmbFetchStorage = PixelStorage::HALF4;
+	_relaxVmbInfo   = device.create_image<float>(PixelStorage::FLOAT4, width, height);
+	_relaxVmbInfo2  = device.create_image<float>(PixelStorage::FLOAT4, width, height);
+	_relaxVmbFetchA = device.create_image<float>(vmbFetchStorage, width, height);
+	_relaxVmbFetchB = device.create_image<float>(vmbFetchStorage, width, height);
+	_relaxVmbFetchC = device.create_image<float>(vmbFetchStorage, width, height);
+	_relaxVmbInfo.set_name("relax_vmb_info");
+	_relaxVmbInfo2.set_name("relax_vmb_info2");
+	_relaxVmbFetchA.set_name("relax_vmb_fetch_a");
+	_relaxVmbFetchB.set_name("relax_vmb_fetch_b");
+	_relaxVmbFetchC.set_name("relax_vmb_fetch_c");
+
 	_relaxHeap = device.create_bindless_array(10u);
-	_relaxConstantsBuf = device.create_buffer<RelaxConstants>(1u);
+	_relaxConstantsBuf = device.create_buffer<RelaxConstants>(2u); // element 1 = pano state (aliased members)
 }
 
 //==========================================================================
@@ -160,6 +192,11 @@ void RelaxDenoiser::release() {
 	_relaxDiffFast.release();
 	_relaxSpecFast.release();
 	_relaxHistoryLength.release();
+	_relaxVmbInfo.release();
+	_relaxVmbInfo2.release();
+	_relaxVmbFetchA.release();
+	_relaxVmbFetchB.release();
+	_relaxVmbFetchC.release();
 }
 
 //==========================================================================
@@ -198,15 +235,30 @@ void RelaxDenoiser::_populateRelaxConstantsStruct(
 	consts.gPrevFrustumRight   = luisa::make_float4(cam.prev_right * cam.aspect * halfTan, 0.0f);
 	consts.gPrevFrustumUp      = luisa::make_float4(cam.prev_up * halfTan, 0.0f);
 	consts.gWorldToClip     = cam.view_proj;
+	// NRD frame contract: the denoiser reconstructs CAMERA-RELATIVE positions
+	// (viewZ along the current frustum basis) while these matrices are
+	// WORLD-space. The bridge is explicit in the shaders:
+	// - projecting a camera-relative point P (virtual motion, guard, Stage 2):
+	//   use (P + gCamPosCur) with the world matrices —
+	//   prevClip(W) = prev_view_proj · (X_rel + C_cur), exact for rotation AND
+	//   translation (the former composed-matrix attempt rotated the world-axes
+	//   offset X_rel by the camera basis — garbage projections, mode 15 R = 0);
+	// - reconstructing previous-frame tap positions (prev frustum basis, prev
+	//   camera at origin): add (gCamPosCur − gCameraDelta) = C_prev;
+	// - gCameraDelta stays the WORLD-axes translation C_cur − C_prev (NRD's
+	//   semantic), used for the depth reference and the tap position.
 	consts.gWorldToClipPrev = cam.prev_view_proj;
 	consts.gCameraDelta = luisa::make_float4(cam.position - cam.prev_position, 0.0f);
-	// Rotation: prev_world -> cur_world for backface normal rotation
-	auto prevBasis = glm::transpose(glm::mat3(toci(cam.prev_right), toci(cam.prev_up), toci(cam.prev_front)));
-	auto curBasis  = glm::mat3(toci(cam.right), toci(cam.up), toci(cam.front));
-	auto rot = curBasis * prevBasis;
+	consts.gCamPosCur = luisa::make_float4(cam.position, 0.0f);
+	// Normals are stored in WORLD axes (denoiseNormal / history), and NRD's
+	// camera-relative world keeps the app-world AXES between frames (only the
+	// origin moves) — gWorldPrevToWorld exists for animated objects and is
+	// identity for static scenes (NRD sample passes identity). The former
+	// B_curᵀ·B_prev camera rotation wrongly rotated world-space prev normals in
+	// the VMB normal gates by the full per-frame camera rotation.
 	consts.gWorldPrevToWorld = luisa::float4x4(
-		luisa::make_float4(tolc(rot[0]), 0.f), luisa::make_float4(tolc(rot[1]), 0.f),
-		luisa::make_float4(tolc(rot[2]), 0.f), luisa::make_float4(0.f, 0.f, 0.f, 1.f));
+		luisa::make_float4(1.f, 0.f, 0.f, 0.f), luisa::make_float4(0.f, 1.f, 0.f, 0.f),
+		luisa::make_float4(0.f, 0.f, 1.f, 0.f), luisa::make_float4(0.f, 0.f, 0.f, 1.f));
 	consts.gMvScale = luisa::make_float4(0.5f, 0.5f, 0.0f, 0.0f);
 	consts.gJitterX = cam.jitter.x;
 	consts.gJitterY = cam.jitter.y;
@@ -254,7 +306,9 @@ void RelaxDenoiser::_populateRelaxConstantsStruct(
 	consts.gConfidenceDrivenLuminanceEdgeStoppingRelaxation = _relaxSettings.confidenceDrivenLuminanceEdgeStoppingRelaxation;
 	consts.gConfidenceDrivenNormalEdgeStoppingRelaxation = _relaxSettings.confidenceDrivenNormalEdgeStoppingRelaxation;
 	consts.gMinSpecHitDistForVirtualMotion       = 0.1f;
-	consts.gMaxAllowedVirtualMotionAcceleration   = 10.0f;
+	// NRD NRD_MAX_ALLOWED_VIRTUAL_MOTION_ACCELERATION (Common.hlsli:55) = 5.0
+	// ("keep relatively high to avoid ruining concave mirrors (was 15)").
+	consts.gMaxAllowedVirtualMotionAcceleration   = 5.0f;
 	consts.gDisocclusionParallaxDenominator       = _relaxSettings.disocclusionParallaxDenominator;
 	consts.gDiffMinMaterial                    = _relaxSettings.diffMinMaterial;
 	consts.gSpecMinMaterial                    = _relaxSettings.specMinMaterial;
@@ -270,6 +324,38 @@ void RelaxDenoiser::_populateRelaxConstantsStruct(
 	consts.gHistoryThreshold = (float)_relaxSettings.spatialVarianceEstimationHistoryThreshold;
 	consts.gOrthoMode    = 0.0f;
 	consts.gFramerateScale = 60.0f * dt;
+
+	// --- Non-perspective projection state (§5.4): raw bases + per-type params.
+	// Rides ELEMENT 1 of _relaxConstantsBuf through aliased members (§9 perf
+	// fix — see PassDenoiser.h). The unproject factor for the point-origin projections is
+	// the per-projection angular pixel size (max of the horizontal/vertical
+	// extents) — a constant per frame, unlike the fov-derived perspective
+	// value; it overwrites the existing gUnproject member (no size change). ---
+	const float fisheyeHalfFovRad = glm::radians(cam.fisheye_fov) * 0.5f;
+	_relaxPanoConstsCpu = render::RelaxConstants{};
+	_relaxPanoConstsCpu.gFrustumRight  = luisa::make_float4(cam.right, 0.0f);
+	_relaxPanoConstsCpu.gFrustumUp     = luisa::make_float4(cam.up, 0.0f);
+	_relaxPanoConstsCpu.gFrustumForward = luisa::make_float4(cam.front, 0.0f);
+	_relaxPanoConstsCpu.gPrevFrustumRight = luisa::make_float4(cam.prev_right, 0.0f);
+	_relaxPanoConstsCpu.gPrevFrustumUp    = luisa::make_float4(cam.prev_up, 0.0f);
+	_relaxPanoConstsCpu.gPrevFrustumForward = luisa::make_float4(cam.prev_front, 0.0f);
+	_relaxPanoConstsCpu.gCameraDelta = luisa::make_float4(fisheyeHalfFovRad, halfTan, 0.0f, 0.0f);
+	switch (cam.projection) {
+		case 1u: // equirect: horizontal 2pi/W, vertical pi/H
+			consts.gUnproject = std::max(6.2831853f / (float)width,
+			                             3.14159265f / (float)height);
+			break;
+		case 2u: // cylindrical: horizontal 2pi/W, vertical 2*tan(fov/2)/H
+			consts.gUnproject = std::max(6.2831853f / (float)width,
+			                             2.0f * halfTan / (float)height);
+			break;
+		case 3u: // fisheye: angular pixel = (fov/2)/(min dimension/2)
+			consts.gUnproject = fisheyeHalfFovRad /
+			                    (0.5f * (float)std::min(width, height));
+			break;
+		default:
+			break;
+	}
 
 	// Time-based steady-state alphas: 1 - exp(-dt / tau)
 	// where tau = N / 60, preserving behavior at 60fps
@@ -308,16 +394,37 @@ void RelaxDenoiser::_populateRelaxConstantsStruct(
 //==========================================================================
 
 void RelaxDenoiser::_populateRelaxConstants(
-	Stream& stream,
+	CommandList& cmdlist,
 	const util::CameraData& cam,
 	uint width, uint height,
 	uint frameCount, uint cbField,
 	bool accumReset,
 	float dt)
 {
-	RelaxConstants consts = {};
-	_populateRelaxConstantsStruct(consts, cam, width, height, frameCount, cbField, accumReset, dt);
-	stream << _relaxConstantsBuf.copy_from(&consts);
+	// Populates the member staging struct (not a local) — the host pointer
+	// must outlive CommandList submission.
+	_relaxConstantsCpu = render::RelaxConstants{};
+	_populateRelaxConstantsStruct(_relaxConstantsCpu, cam, width, height, frameCount, cbField, accumReset, dt);
+	// Two-element upload: [0] = denoiser constants, [1] = pano state (§9
+	// perf fix — the pano kernels read element 1 through aliased members;
+	// perspective kernels never touch it, and their shader hashes stay
+	// identical to the pre-projection build). The member array outlives
+	// CommandList submission.
+	_relaxConstantsUpload[0] = _relaxConstantsCpu;
+	_relaxConstantsUpload[1] = _relaxPanoConstsCpu;
+	cmdlist << _relaxConstantsBuf.copy_from(&_relaxConstantsUpload[0]);
+}
+
+//==========================================================================
+// RelaxDenoiser::renderClassifyTiles (perf R2 item 9)
+//==========================================================================
+
+void RelaxDenoiser::renderClassifyTiles(CommandList& cmdlist, const FrameContext& ctx) {
+	if (!_enabled) return;
+	cmdlist << _relaxClassifyTiles(_relaxTiles, ctx.gbufDepth,
+			_relaxSettings.denoisingRange)
+		.dispatch(((ctx.width + 15u) / 16u) * 8u, ((ctx.height + 15u) / 16u) * 4u);
+	_tilesClassifiedThisFrame = true;
 }
 
 //==========================================================================
@@ -331,7 +438,7 @@ void RelaxDenoiser::renderPrefilter(CommandList& cmdlist, const FrameContext& ct
 	profiler.set_pass("ReLAX/prefilter");
 	cmdlist << _denoisePreFilterShader(
 			ctx.denoiseAlbedo, ctx.denoiseSpecFactor, ctx.denoiseNormal,
-			ctx.gbufDepth, ctx.gbufVis, ctx.gbufBaryMotion,
+			ctx.gbufDepth, ctx.gbufVis, ctx.gbufBaryMotion, _relaxTiles,
 			ctx.camera, ctx.geometry.instance_buffer(),
 			ctx.geometry.instance_transform_buffer(),
 			ctx.materialPool.buffer(), ctx.geometry.vertex_bindless(),
@@ -350,6 +457,22 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
                             const Image<float>& renderTarget, bool debugTagNone,
                             const Image<float>* rasterDepth) {
 	if (!_enabled) return false;
+	// Projection gate: the point-origin projections (equirect / cylindrical /
+	// fisheye) run the analytic reconstruction paths added in Phase 2
+	// (eval_point_origin_direction + analytic reprojection + u-wrap). The room
+	// rig (4) still needs per-face frustum constants — denoising it stays
+	// deferred to the per-face dispatch evaluation (report §5.2); offline
+	// progressive accumulation remains its export path.
+	if (ctx.camera.projection == static_cast<uint32_t>(util::CameraProjection::RoomRig)) {
+		static bool sWarnedRig = false;
+		if (!sWarnedRig) {
+			sWarnedRig = true;
+			CI_LOG_W("Denoiser: room-rig projection active - per-face denoising is "
+			         "not implemented (report Phase 2 option); rendering raw "
+			         "(use progressive accumulation for clean stills)");
+		}
+		return false;
+	}
 	_frameCount = ctx.frameCount;
 	_width = ctx.width;
 	_height = ctx.height;
@@ -372,27 +495,44 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
 			.dispatch(_width, _height);
 		return true;
 	}
+	if (_relaxHistClampDebugViz == 21) {
+		// Raw specular hit-distance field (pre-denoiser, pre-PrePass). The RGB
+		// can be clean while .w churns — this is the field TA steers the
+		// virtual-motion ray with (report §12 R2).
+		stream << _relaxRawHitDistViz(renderTarget, ctx.specularBuffer)
+			.dispatch(_width, _height);
+		return true;
+	}
 #endif
 
 	uint prevIdx = _relaxFrameIdx & 1u;
 	uint curIdx  = 1u - prevIdx;
 
-	// Upload constants (small buffer, direct stream)
-	_populateRelaxConstants(stream, ctx.camera, _width, _height, _frameCount, ctx.cbField, _accumReset, ctx.deltaTime);
-
-	// Batch: classify + hitDist + prepass (NRD order). Noisy inputs are read
-	// straight from shade's clamped accum/spec buffers — the clamp-blit
-	// conversion passes were folded into the shade writes.
+	// Batch: constants upload + classify + prepass (NRD order) + temporal
+	// accumulation + history fix + history clamping. The constants
+	// upload used to be its own stream submission before the setup batch —
+	// folding it in front of its first reader saves one submission per frame
+	// (each stream << costs a CommandAllocator with pre-allocated GPU
+	// buffers). Noisy inputs are read straight from shade's clamped accum/spec
+	// buffers — the clamp-blit conversion passes were folded into the shade
+	// writes. The former 3x3 hit-dist smoothing pass was removed (RC2): NRD's
+	// reconstruction pass is zero-fill and OFF by default; TA consumes the
+	// PrePass stochastic-min .w directly.
 	{
 		util::CpuScopedTimer _cpu_ReLAX_setup("ReLAX/setup");
 		auto cl = CommandList::create();
-		profiler.set_pass("ReLAX/classify");
-		cl << _relaxClassifyTiles(_relaxTiles, ctx.gbufDepth, _relaxConstantsBuf)
-			.dispatch(((_width + 15u) / 16u) * 8u, ((_height + 15u) / 16u) * 4u);
-		profiler.set_pass("ReLAX/hitdist");
-		cl << _relaxHitDistReconstruct(_relaxConstantsBuf,
-				ctx.specularBuffer, ctx.gbufDepth, ctx.denoiseNormal,
-				_relaxSpecHitDistSmoothed).dispatch(_width, _height);
+		_populateRelaxConstants(cl, ctx.camera, _width, _height, _frameCount, ctx.cbField, _accumReset, ctx.deltaTime);
+		// ClassifyTiles normally runs with the prefilter batch (Pass 1.6,
+		// renderClassifyTiles) so prefilter's sky gate sees this frame's
+		// tiles. Re-dispatch here only when that batch was skipped (debug-viz
+		// early returns) — the prepass below is the first tile consumer.
+		if (!_tilesClassifiedThisFrame) {
+			profiler.set_pass("ReLAX/classify");
+			cl << _relaxClassifyTiles(_relaxTiles, ctx.gbufDepth,
+					_relaxSettings.denoisingRange)
+				.dispatch(((_width + 15u) / 16u) * 8u, ((_height + 15u) / 16u) * 4u);
+		}
+		_tilesClassifiedThisFrame = false;
 		profiler.set_pass("ReLAX/prepass");
 		cl << _relaxPrepass(_relaxConstantsBuf, ctx.accumBuffer, ctx.specularBuffer,
 				ctx.denoiseNormal, ctx.gbufDepth, _relaxTiles).dispatch(_width, _height);
@@ -400,15 +540,25 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
 			cl << _relaxMotionCopy(*rasterDepth, ctx.gbufVis, ctx.gbufBaryMotion)
 				.dispatch(_width, _height);
 		}
-		stream << cl.commit();
-	}
 
-	// Batch: temporal accumulation + history fix + noisy blit + history clamping
-	{
-		util::CpuScopedTimer _cpu_ReLAX_TA_Clamp("ReLAX/TA+Clamp");
-		auto cl = CommandList::create();
-		profiler.set_pass("ReLAX/temporal");
-		cl << _relaxTemporalAccumulation(
+		// Split-kernel specular VMB prepass (e55): produces the virtual-motion
+		// fetch/state that TA consumes as textures. Same bindings as the TA
+		// spec channels (prev-frame histories + this frame's filtered input);
+		// tiles give it the same sky-tile early-out TA has.
+		profiler.set_pass("ReLAX/VmbPrepass");
+		cl << _relaxSpecVmbPrepass(_relaxConstantsBuf,
+				ctx.gbufDepth, ctx.denoiseNormal, ctx.gbufBaryMotion, ctx.specularBuffer,
+				_relaxSpecHistory[prevIdx], _relaxSpecFastHistory[prevIdx],
+				_relaxSpecHitDistPrev[prevIdx], _relaxNormalRoughnessPrev[prevIdx],
+				_relaxViewZPrev[prevIdx], _relaxTiles,
+				_relaxVmbInfo, _relaxVmbInfo2,
+				_relaxVmbFetchA, _relaxVmbFetchB, _relaxVmbFetchC
+			).dispatch(_width, _height);
+
+		{
+			util::CpuScopedTimer _cpu_ReLAX_TA_Clamp("ReLAX/TA+Clamp");
+			profiler.set_pass("ReLAX/temporal");
+			cl << _relaxTemporalAccumulation(
 				_relaxConstantsBuf, ctx.gbufDepth, ctx.denoiseNormal, ctx.accumBuffer,
 				ctx.gbufBaryMotion, ctx.gbufVis,
 				_relaxDiffHistory[curIdx], _relaxDiffFastHistory[curIdx],
@@ -420,34 +570,36 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
 				ctx.specularBuffer, _relaxSpecHistory[curIdx], _relaxSpecFastHistory[curIdx],
 				_relaxSpecHistory[prevIdx], _relaxSpecFastHistory[prevIdx],
 				_relaxViewZPrev[prevIdx], _relaxSpecHitDistPrev[prevIdx],
-				_relaxSpecHitDistPrev[curIdx], _relaxSpecHitDistSmoothed
+				_relaxSpecHitDistPrev[curIdx],
+				_relaxVmbInfo, _relaxVmbInfo2,
+				_relaxVmbFetchA, _relaxVmbFetchB, _relaxVmbFetchC
 			).dispatch(_width, _height);
 
-		profiler.set_pass("ReLAX/HistoryFix");
-		cl << _relaxHistoryFix(_relaxConstantsBuf,
-			_relaxDiffHistory[curIdx], _relaxDiffFastHistory[curIdx],
-			_relaxHistoryLengthPrev[curIdx], _relaxNormalRoughnessPrev[curIdx],
-			_relaxViewZPrev[curIdx], _relaxTiles,
-			_relaxSpecHistory[curIdx], _relaxSpecFastHistory[curIdx]
-		).dispatch(_width, _height);
+			profiler.set_pass("ReLAX/HistoryFix");
+			cl << _relaxHistoryFix(_relaxConstantsBuf,
+				_relaxDiffHistory[curIdx], _relaxDiffFastHistory[curIdx],
+				_relaxHistoryLengthPrev[curIdx], _relaxNormalRoughnessPrev[curIdx],
+				_relaxViewZPrev[curIdx], _relaxTiles,
+				_relaxSpecHistory[curIdx], _relaxSpecFastHistory[curIdx]
+			).dispatch(_width, _height);
 
 #if NT_DEBUG_VIZ
 			if (_relaxDebugStage == 0 || _relaxDebugStage >= 3) {
 #endif
-			profiler.set_pass("ReLAX/HistoryClamp");
-			cl << _relaxHistoryClamping(_relaxConstantsBuf,
+				profiler.set_pass("ReLAX/HistoryClamp");
+				cl << _relaxHistoryClamping(_relaxConstantsBuf,
 					_relaxDiffHistory[curIdx], _relaxDiffFastHistory[curIdx],
 					_relaxHistoryLengthPrev[curIdx], ctx.accumBuffer,
 					_relaxViewZPrev[curIdx], _relaxTiles,
 					_relaxSpecHistory[curIdx], _relaxSpecFastHistory[curIdx],
 					ctx.specularBuffer
 				).dispatch(_width, _height);
-		
 #if NT_DEBUG_VIZ
 			}
 #endif
 
-		stream << cl.commit();
+			stream << cl.commit();
+		}
 	}
 
 #if NT_DEBUG_VIZ
@@ -530,8 +682,16 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
 				// smem variant's 2px halo only covers taps within ±2 px of the
 				// block — use it for steps 1-2 (exactly in-tile), direct variant
 				// for step >= 4 (smem coords would clamp to the tile edge and
-				// silently read the wrong neighbors).
-				auto& atrousShader = (stepSize <= 2u) ? _relaxAtrousSmem : _relaxAtrous;
+				// silently read the wrong neighbors). Equirect/cylindrical seam
+				// wraps disqualify the smem variant at every step: a u-wrapped
+				// tap lands across the whole image, outside any block halo, and
+				// the smem coord clamp would read the wrong texel while the
+				// world position still uses the wrapped UV.
+				const bool wrapUProjection =
+					ctx.camera.projection == static_cast<uint32_t>(util::CameraProjection::Equirect) ||
+					ctx.camera.projection == static_cast<uint32_t>(util::CameraProjection::Cylindrical);
+				auto& atrousShader =
+					(stepSize <= 2u && !wrapUProjection) ? _relaxAtrousSmem : _relaxAtrous;
 				cl << atrousShader(_relaxConstantsBuf,
 						_relaxDiff[writeIdx], _relaxDiff[readIdx],
 						_relaxNormalRoughnessPrev[curIdx], _relaxViewZPrev[curIdx],
@@ -540,19 +700,38 @@ bool RelaxDenoiser::render(Stream& stream, const FrameContext& ctx,
 					).dispatch(_width, _height);
 			}
 		}
-		stream << cl.commit();
 
+		// Composite rides the same CommandList as the atrous iterations —
+		// same-stream FIFO + automatic UAV barriers order it behind the last
+		// atrous write (was a separate stream submission).
 		uint atrousResultIdx = (atrousIter + atrousStartIdx) & 1u;
+#if NT_DEBUG_VIZ
+		if (_relaxHistClampDebugViz >= 13 && _relaxHistClampDebugViz <= 40) {
+			// Spec-temporal viz modes: blit the RAW TA output (_relaxSpecHistory
+			// is where TA writes the viz encoding). The former wiring blitted
+			// _relaxSpec[atrousResultIdx] — five atrous blur iterations smeared
+			// the debug channels (ramps smoothed, markers dissolved), making
+			// every 13/14/15 capture approximate. The new blit also paints the
+			// build-epoch marker (top-left corner) on the FINAL framebuffer,
+			// where no early-out or blur can bury it.
+			// (Range extended to 19 for modes 16-18: outside it the probe
+			// encodings fell through to the scene composite and every decode
+			// of them was garbage.)
+			cl << _relaxSpecVizBlit(renderTarget, _relaxSpecHistory[curIdx])
+				.dispatch(_width, _height);
+		} else
+#endif
 		if (debugTagNone) {
 			util::CpuScopedTimer _cpu_ReLAX_compose("ReLAX/compose");
 			profiler.set_pass("ReLAX/compose");
-			stream << _compositeBlitShader(renderTarget, _relaxDiff[atrousResultIdx],
+			cl << _compositeBlitShader(renderTarget, _relaxDiff[atrousResultIdx],
 					ctx.gbufDepth, envmap, ctx.camera, env_width, env_height,
 				env_rotation, env_exposure,
 				ctx.denoiseAlbedo, ctx.denoiseSpecFactor, _relaxSpec[atrousResultIdx],
 				ctx.solidBgEnabled ? 1u : 0u, ctx.solidBgColor)
 				.dispatch(_width, _height);
 		}
+		stream << cl.commit();
 	}
 	return true;
 }
@@ -641,7 +820,7 @@ void RelaxDenoiser::drawUi() {
 			ImGui::SliderInt("Debug Stage (0=all, 1=TA only, 2=+HistFix, 3=+HistClamp)", &_relaxDebugStage, 0, 3);
 			ImGui::Checkbox("Disable Anti-lag", &_relaxDisableAntilag);
 			ImGui::Checkbox("Disable YCoCg Clamp", &_relaxDisableClamp);
-			ImGui::SliderInt("HistClamp Debug Viz (0=off, 10=TA debug)", &_relaxHistClampDebugViz, 0, 20);
+			ImGui::SliderInt("HistClamp Debug Viz (0=off, 10=TA, 13/14/15=spec temporal, 21=raw hitT)", &_relaxHistClampDebugViz, 0, 21);
 #endif
 		}
 	}
@@ -694,12 +873,19 @@ void RelaxDenoiser::toJson(ci::Json& j) const {
 		{"specMinMaterial",                       s.specMinMaterial},
 		{"accumulationTimeEnabled",               s.accumulationTimeEnabled},
 		{"accumulationTime",                      s.accumulationTime},
+		{"histClampDebugViz",                     _relaxHistClampDebugViz},
+		{"debugStage",                            _relaxDebugStage},
 	};
 }
 
 void RelaxDenoiser::fromJson(const ci::Json& j) {
 	if (!j.is_object()) return;
 	_enabled = j.value("enabled", _enabled);
+	// Debug-viz mode persists across launches: DSL kernels compile at startup,
+	// so a fresh instance starts with the slider's previous value — and the
+	// corner epoch marker is visible from the first frame without UI driving.
+	_relaxHistClampDebugViz = j.value("histClampDebugViz", _relaxHistClampDebugViz);
+	_relaxDebugStage = j.value("debugStage", _relaxDebugStage);
 	auto& s = _relaxSettings;
 	s.diffuseMaxAccumulatedFrameNum        = j.value("diffuseMaxAccumulatedFrameNum",       s.diffuseMaxAccumulatedFrameNum);
 	s.diffuseMaxFastAccumulatedFrameNum     = j.value("diffuseMaxFastAccumulatedFrameNum",   s.diffuseMaxFastAccumulatedFrameNum);

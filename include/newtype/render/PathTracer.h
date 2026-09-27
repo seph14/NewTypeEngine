@@ -32,7 +32,7 @@ using namespace luisa::compute;
  * - Temporal accumulation
  *
  * @note This is a static shader (not hot-reloadable). For experimentation,
- *       use the PathTracerShader in runtime_shaders/.
+ *       use the hot-reloadable shader projects in runtime_shaders/ (SimpleTestShader).
  */
 class PathTracer {
 public:
@@ -57,7 +57,7 @@ public:
         luisa::compute::Image<float>,           // output (accumulation buffer)
         luisa::compute::Image<uint>,            // seed_image (random number state)
         luisa::compute::Accel,                  // accel (scene acceleration structure)
-        luisa::compute::Buffer<util::Vertex>,   // mesh_vertices (vertex attributes, now using compact 32-byte Vertex)
+        luisa::compute::Buffer<util::ActiveVertex>,   // mesh_vertices (vertex attributes, now using compact 32-byte Vertex)
         luisa::compute::Buffer<uint>,                 // material_indices (per-primitive material)
         luisa::compute::Buffer<MaterialData>,         // materials (material data from MaterialPool)
         float,                                    // light_select_pmf (PMF for light selection)

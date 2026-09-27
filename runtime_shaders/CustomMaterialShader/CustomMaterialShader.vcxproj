@@ -52,6 +52,10 @@
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Centralized compiler blob (defines, includes, options) -->
+  <ImportGroup Label="EngineCommon">
+    <Import Project="..\..\vc2022\EngineCommon.props" />
+  </ImportGroup>
   <ImportGroup Label="ExtensionSettings" />
 
   <ImportGroup Label="PropertySheets">
@@ -79,71 +83,64 @@
     <IntDir>$(SolutionDir)build\Intermediate\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
 
-  <!-- ClCompile Settings for Debug_Runtime -->
+  <!-- Debug_Runtime Configuration: DLL with Runtime enabled -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_Runtime|x64'">
     <ClCompile>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0502;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;RT_RUNTIME;CUSTOM_MATERIAL_EXPORTS;CINDER_SHARED;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(CudaInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <DisableSpecificWarnings>4244;4267;4068;5105;4996</DisableSpecificWarnings>
+      <PreprocessorDefinitions>CUSTOM_MATERIAL_EXPORTS;RT_RUNTIME;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ImportLibrary>$(OutDir)$(TargetName).lib</ImportLibrary>
-      <AdditionalDependencies>$(LuisaComputeLibDebug)\luisa-dsl.lib;$(LuisaComputeLibDebug)\luisa-xir.lib;$(LuisaComputeLibDebug)\luisa-osl.lib;$(LuisaComputeLibDebug)\luisa-runtime.lib;$(LuisaComputeLibDebug)\luisa-ast.lib;$(LuisaComputeLibDebug)\luisa-core.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(EngineLuisaLibsDebug);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
-  <!-- ClCompile Settings for Debug/Release (Static) -->
+  <!-- Debug Configuration: Static Library (included in main exe) -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0502;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;CINDER_SHARED;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(CudaInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <DisableSpecificWarnings>4244;4267;4068;5105;4996</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
 
+  <!-- Release Configuration: Static Library -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0502;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;CINDER_SHARED;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(CudaInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <DisableSpecificWarnings>4244;4267;4068;5105;4996</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
 
   <!-- Source Files -->
   <ItemGroup>
-    <ClCompile Include="CustomMaterialShader.cpp" />
+    <!-- PCH: heavy DSL/engine headers compiled once (see pch.h) — the single
+         resolver TU took ~9s without it. Per-file metadata overrides the
+         NotUsing defaults in the IDGs above. -->
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+    </ClCompile>
+    <ClCompile Include="CustomMaterialShader.cpp">
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <!-- Forced include: the edited resolver file keeps its own include list. -->
+      <ForcedIncludeFiles>pch.h</ForcedIncludeFiles>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CustomMaterialShader.h" />
     <ClInclude Include="CustomMaterialShaderAPI.h" />
+    <ClInclude Include="pch.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

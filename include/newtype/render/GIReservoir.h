@@ -25,7 +25,7 @@ using namespace luisa::compute;
  *                            (16b log luminance + 8b chroma u + 8b chroma v)
  *   weight_sum      (4B)   — RIS weight sum
  *   target_pdf      (4B)   — p_hat of selected sample
- *   packed_meta     (4B)   — M(16) | age(6) | vis_age(3) | visibility(1) | roughness_q(6)
+ *   packed_meta     (4B)   — M(16) | age(6) | vis_age(2) | cache_hit(1) | visibility(1) | roughness_q(6)
  */
 struct alignas(8) GIReservoir {
     float px, py, pz;
@@ -75,9 +75,19 @@ LUISA_STRUCT(newtype::render::GIReservoir,
         return (packed_meta >> 16u) & 0x3Fu;
     }
 
-    /// Frames since visibility was last confirmed (0..7).
+    /// Frames since visibility was last confirmed (0..3). GI vis_age reuse was
+    /// removed (shade always re-traces), so the field is bookkeeping only —
+    /// bit 24 was carved out for cache_hit.
     [[nodiscard]] auto vis_age() const noexcept {
-        return (packed_meta >> 22u) & 0x7u;
+        return (packed_meta >> 22u) & 0x3u;
+    }
+
+    /// 1 = the stored sample's radiance came from a SHARC cache hit at x2.
+    /// Estimator-domain tag: such reservoirs skip temporal/spatial reuse —
+    /// merging cache-sourced and NEE-sourced reservoirs inflates W through
+    /// the fresh-vs-winner p_hat ratio (plan §9.2).
+    [[nodiscard]] auto cache_hit() const noexcept {
+        return (packed_meta >> 24u) & 1u;
     }
 
     /// 0 = untested/blocked (need shadow ray), 1 = confirmed visible.
@@ -132,7 +142,11 @@ LUISA_STRUCT(newtype::render::GIReservoir,
     }
 
     void set_vis_age(::luisa::compute::UInt v) noexcept {
-        packed_meta = (packed_meta & ~(0x7u << 22u)) | ((v & 0x7u) << 22u);
+        packed_meta = (packed_meta & ~(0x3u << 22u)) | ((v & 0x3u) << 22u);
+    }
+
+    void set_cache_hit(::luisa::compute::UInt v) noexcept {
+        packed_meta = (packed_meta & ~(1u << 24u)) | ((v & 1u) << 24u);
     }
 
     void set_visibility(::luisa::compute::UInt v) noexcept {

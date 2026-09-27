@@ -27,7 +27,7 @@ namespace newtype::render {
 // gating matches full-MaterialData gating up to float evaluation order.
 //
 // Stored in MaterialPool's sim-key buffer so ReSTIR neighbor gates read 12
-// bytes instead of a 176-byte MaterialData per comparison.
+// bytes instead of a 192-byte MaterialData per comparison.
 [[nodiscard]] inline luisa::float3 material_similarity_key(const MaterialData& m) noexcept {
     const auto lum = [](const luisa::float3& c) noexcept {
         return luisa::dot(c, luisa::make_float3(0.2126f, 0.7152f, 0.0722f));

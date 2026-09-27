@@ -40,7 +40,7 @@ struct SceneGeometryResources {
     const luisa::compute::Buffer<luisa::float4x4>& instance_transform_prev_buffer;
     const luisa::compute::Buffer<render::MaterialData>& material_buffer;
     // Packed {roughness, luminance(F0), luminance(albedo)} per material for the
-    // ReSTIR GI similarity gates (see MaterialSimilarity.h) — 12B vs 176B reads.
+    // ReSTIR GI similarity gates (see MaterialSimilarity.h) — 12B vs 192B reads.
     const luisa::compute::Buffer<luisa::float3>& sim_key_buffer;
 };
 

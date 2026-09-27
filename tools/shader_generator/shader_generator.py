@@ -342,6 +342,12 @@ class ShaderGenerator:
             "description": description,
             "additional_includes": [],
             "using_namespaces": [],
+            # PCH payload: the heavy template headers that dominate the TU
+            # compile. Mirrors runtime_shaders/CustomMaterialShader/pch.h.
+            "pch_includes": [
+                f'"{shader_name}.h"',
+                "<luisa/dsl/sugar.h>",
+            ],
         }
 
         # Render and write templates
@@ -350,6 +356,8 @@ class ShaderGenerator:
             ("shader.h.j2", f"{shader_name}.h"),
             ("shaderAPI.h.j2", f"{shader_name}API.h"),
             ("shader.cpp.j2", f"{shader_name}.cpp"),
+            ("pch.h.j2", "pch.h"),
+            ("pch.cpp.j2", "pch.cpp"),
         ]
 
         for template_name, output_name in templates:
@@ -385,7 +393,10 @@ class ShaderGenerator:
         print(f"  ShaderManager::instance().loadShader(generator);")
         print(f"  ")
         print(f"  // Invoke the shader (specify template args matching your kernel)")
-        print(f"  stream << ShaderManager::instance().shader<2, /* Args... */>(\"{function_suffix}\", args...)")
+        print(f"  // Resolve once (member); dispatch has no string lookup")
+        print(f"  ShaderHandle<2, /* Args... */> _{function_suffix};")
+        print(f"  _{function_suffix}.assign(\"{function_suffix}\");")
+        print(f"  stream << ShaderManager::instance().shader(_{function_suffix}, args...)")
         print(f"             .dispatch(width, height);")
 
         return True

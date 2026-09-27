@@ -11,8 +11,8 @@
         "depthThreshold": 0.003000000026077032,
         "diffMinMaterial": 4.0,
         "diffPhiLuminance": 1.0,
-        "diffuseMaxAccumulatedFrameNum": 18,
-        "diffuseMaxFastAccumulatedFrameNum": 3,
+        "diffuseMaxAccumulatedFrameNum": 51,
+        "diffuseMaxFastAccumulatedFrameNum": 8,
         "diffuseMinLuminanceWeight": 0.0,
         "diffusePrepassBlurRadius": 30.0,
         "disocclusionParallaxDenominator": 30.0,
@@ -33,8 +33,8 @@
         "roughnessEdgeStoppingRelaxation": 1.0,
         "roughnessFraction": 0.15000000596046448,
         "spatialVarianceEstimationHistoryThreshold": 1,
-        "specMaxAccumulatedFrameNum": 18,
-        "specMaxFastAccumulatedFrameNum": 3,
+        "specMaxAccumulatedFrameNum": 51,
+        "specMaxFastAccumulatedFrameNum": 8,
         "specMinMaterial": 4.0,
         "specPhiLuminance": 1.0,
         "specularLobeAngleSlack": 0.15000000596046448,
@@ -43,7 +43,7 @@
         "specularVarianceBoost": 1.0
     },
     "di": {
-        "brdfCandidateRoughnessCutoff": 0.03,
+        "brdfCandidateRoughnessCutoff": 0.029999999329447746,
         "brdfCutoff": 9.999999747378752e-05,
         "diBiasCorrectionEnabled": false,
         "diTemporalBiasRayTraced": true,
@@ -56,7 +56,6 @@
         "spatialRadius": 20,
         "targetPdfFloor": 9.99999993922529e-09,
         "temporalMaxM": 512,
-        "temporalMotionThresh": 32.0,
         "visMaxAge": 4,
         "visMaxDistance": 16.0,
         "wSumCap": 1000000.0
@@ -68,14 +67,14 @@
         "giAccumulationTimeEnabled": true,
         "giBiasCorrectionDivergenceThresh": 2.0,
         "giHalfRes": false,
-        "giMISRoughness": 0.30001192092896,
+        "giMISRoughness": 0.7009999752044678,
         "giMatSimAlbedo": 0.25,
         "giMatSimF0": 0.25,
         "giMatSimRoughness": 0.25,
-        "giMaxAge": 27,
+        "giMaxAge": 51,
         "giMaxRadiance": 10.0,
         "giOneBounce": false,
-        "giRoughnessInvalidationThresh": 0.1,
+        "giRoughnessInvalidationThresh": 0.10000000149011612,
         "giSpatialMaxM": 1024,
         "giSpatialRadius": 60,
         "giSuppressAwayFromLight": false,
@@ -86,408 +85,23 @@
         "spatialDepthThresh": 0.10000000149011612,
         "spatialNormalThresh": 0.5
     },
-    "materials": [
-        {
-            "data": {
-                "albedo": [
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 1.0,
-                "roughness": 0.30000001192092896,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 14
-            },
-            "name": "checker"
-        },
-        {
-            "data": {
-                "albedo": [
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 1
-            },
-            "name": "gray"
-        },
-        {
-            "data": {
-                "albedo": [
-                    0.800000011920929,
-                    0.10000000149011612,
-                    0.10000000149011612,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 1
-            },
-            "name": "red"
-        },
-        {
-            "data": {
-                "albedo": [
-                    0.10000000149011612,
-                    0.800000011920929,
-                    0.10000000149011612,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 1
-            },
-            "name": "green"
-        },
-        {
-            "data": {
-                "albedo": [
-                    0.0,
-                    0.0,
-                    0.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    10.0,
-                    10.0,
-                    10.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 5
-            },
-            "name": "cyan"
-        },
-        {
-            "data": {
-                "albedo": [
-                    0.0,
-                    0.0,
-                    0.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    400.0,
-                    28.0,
-                    8.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 5
-            },
-            "name": "orange"
-        },
-        {
-            "data": {
-                "albedo": [
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.20000000298023224,
-                "sheen": 0.24500000476837158,
-                "sheen_tint": 0.10499999672174454,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 1
-            },
-            "name": "custom"
-        },
-        {
-            "data": {
-                "albedo": [
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.5,
-                "metallic": 0.0,
-                "roughness": 0.5,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 0.0,
-                "type": 1
-            },
-            "name": "layer"
-        },
-        {
-            "data": {
-                "albedo": [
-                    0.800000011920929,
-                    0.800000011920929,
-                    0.800000011920929,
-                    1.0
-                ],
-                "alphacut": 0.0,
-                "anisotropic": 0.0,
-                "anisotropic_rot": 0.0,
-                "attenuation": [
-                    1.0,
-                    1.0,
-                    1.0
-                ],
-                "attenuation_distance": 1.0,
-                "bsdf_type_override": 0.0,
-                "clearcoat": 0.0,
-                "clearcoat_gloss": 0.5,
-                "diffuse_trans": 0.0,
-                "emission": [
-                    0.0,
-                    0.0,
-                    0.0
-                ],
-                "fabric": 0.0,
-                "flatness": 0.0,
-                "ior": 1.5,
-                "iridescence": 0.0,
-                "iridescence_ior": 1.2999999523162842,
-                "iridescence_thickness": 0.0,
-                "meta": 0.0,
-                "metallic": 0.0,
-                "roughness": 0.0,
-                "sheen": 0.0,
-                "sheen_tint": 0.0,
-                "specular_tint": 0.0,
-                "specular_trans": 1.0,
-                "type": 3
-            },
-            "name": "sphere"
-        }
-    ],
     "pipeline": {
         "boilingFilterStrength": 0.20000000298023224,
         "checkerboardEnabled": true,
         "denoiserEnabled": true,
         "giEnabled": true,
+        "primaryJitterEnabled": false,
+        "renderScale": 1.0,
         "toneMapExposure": 1.0,
         "toneMapGamma": 2.200000047683716,
         "toneMapLutPath": "",
-        "toneMapMode": 0
+        "toneMapMode": 0,
+        "upscalerMode": 0,
+        "upscalerSharpness": 0.0
     },
     "sky": {
         "elevation": 0.30717796087265015,
-        "exposure": 0.0,
+        "exposure": 0.5099999904632568,
         "solidBgColor": [
             0.019999999552965164,
             0.019999999552965164,

@@ -6,9 +6,6 @@
 #include "cinder/Json.h"
 #include "newtype/core/Config.h"
 #include "newtype/timeline/EasingCurve.h"
-#if NT_ENABLE_TIMELINE_EDITOR
-#include "cinder/gl/gl.h"
-#endif
 
 namespace newtype::timeline {
 
@@ -56,9 +53,7 @@ private:
 #if NT_ENABLE_TIMELINE_EDITOR
     int mNodeIdx = -1;
     std::vector<float> mSplits;
-    std::vector<vecP>  mBakedPos;
-    ci::gl::VboRef   mParticleVbo;
-    ci::gl::BatchRef  mParticleBatch;
+    std::vector<vecP>  mBakedPos;   // SAMPLE_POINTS spline samples (gizmo polyline)
 
     void bakePoints();
     void updateSelf();

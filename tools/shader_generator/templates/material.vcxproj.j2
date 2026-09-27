@@ -139,11 +139,24 @@
 
   <!-- Source Files -->
   <ItemGroup>
-    <ClCompile Include="{{ shader_name }}.cpp" />
+    <!-- PCH: heavy DSL/engine headers compiled once (see pch.h) — without it
+         the single resolver TU takes ~9s per hot-reload build. Per-file
+         metadata overrides the NotUsing defaults in the IDGs above. -->
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+    </ClCompile>
+    <ClCompile Include="{{ shader_name }}.cpp">
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <!-- Forced include: the edited resolver file keeps its own include list. -->
+      <ForcedIncludeFiles>pch.h</ForcedIncludeFiles>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="{{ shader_name }}.h" />
     <ClInclude Include="{{ shader_name }}API.h" />
+    <ClInclude Include="pch.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

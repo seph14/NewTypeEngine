@@ -16,6 +16,19 @@ namespace newtype::runtime {
 using HostRegisterFn = std::uint32_t(*)(const char* name, std::any resolve);
 using HostClearFn   = void(*)();
 
+/// ABI v2 host-side param registration (matches the DLL's ParamRegisterFn —
+/// ResolverParamDesc is POD and re-declared here so the engine doesn't include
+/// the DLL API header; keep fields in lockstep).
+struct HostResolverParamDesc {
+    const char* name;
+    float       min_v;
+    float       max_v;
+    float       def_v;
+};
+using HostParamRegisterFn = std::uint32_t(*)(const char* callable,
+                                             const HostResolverParamDesc* descs,
+                                             std::uint32_t count);
+
 /**
  * @brief Minimal DLL loader for custom material callable hot-reload.
  *
@@ -45,7 +58,10 @@ public:
     CallableDLLLoader& operator=(const CallableDLLLoader&) = delete;
 
     /// Set the host-side registration functions (called from Pipeline).
-    void setHostFunctions(HostRegisterFn registerFn, HostClearFn clearFn);
+    /// paramFn may be null: v2 DLLs then see a null ParamRegisterFn and must
+    /// skip param registration (v1 behavior).
+    void setHostFunctions(HostRegisterFn registerFn, HostClearFn clearFn,
+                          HostParamRegisterFn paramFn = nullptr);
 
     /// Load the DLL and call registerMaterialCallables().
     /// @param dllPath    Path to the compiled DLL
@@ -68,8 +84,9 @@ public:
 
 private:
     // DLL-side function signatures (match CustomMaterialShaderAPI.h)
-    using DLLRegisterFn   = void(*)(HostRegisterFn, HostClearFn);
-    using DLLUnregisterFn = void(*)(HostClearFn);
+    using DLLRegisterFn    = void(*)(HostRegisterFn, HostClearFn);
+    using DLLRegisterFn2   = void(*)(HostRegisterFn, HostParamRegisterFn, HostClearFn);
+    using DLLUnregisterFn  = void(*)(HostClearFn);
 
     bool buildDLL();
     bool loadDLL();
@@ -82,10 +99,12 @@ private:
 
     HMODULE _module = nullptr;
     DLLRegisterFn   _dllRegisterFn   = nullptr;
+    DLLRegisterFn2  _dllRegisterFn2  = nullptr;
     DLLUnregisterFn _dllUnregisterFn = nullptr;
 
     HostRegisterFn _hostRegisterFn = nullptr;
     HostClearFn    _hostClearFn    = nullptr;
+    HostParamRegisterFn _hostParamFn = nullptr;
 
     std::string _dllPath;
     std::string _sourcePath;

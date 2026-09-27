@@ -1,0 +1,431 @@
+[
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "visible",
+        "target": "",
+        "time": 0.0,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "curve": {
+            "data": [
+                0.46580398082733154,
+                0.13333339989185333,
+                0.45472028851509094,
+                1.0
+            ],
+            "type": 20.0
+        },
+        "duration": 0.800000011920929,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "initShowCurve",
+        "target": "",
+        "time": 0.0,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.05000000074505806,
+        "valueStart": 0.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.5374124050140381,
+                0.04333332180976868,
+                0.6131818890571594,
+                0.6416664123535156
+            ],
+            "type": 6.0
+        },
+        "duration": 4.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "initRotCurve",
+        "target": "",
+        "time": 1.0,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 1.0,
+        "valueStart": 0.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.36790207028388977,
+                0.8933333158493042,
+                0.4302448630332947,
+                0.9133334159851074
+            ],
+            "type": 20.0
+        },
+        "duration": 0.800000011920929,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "initShowCurve",
+        "target": "",
+        "time": 5.199999809265137,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.0,
+        "valueStart": 0.05000000074505806
+    },
+    {
+        "curve": {
+            "data": [
+                0.949195921421051,
+                0.018333330750465393,
+                0.18017476797103882,
+                1.0
+            ],
+            "type": 19.0
+        },
+        "duration": 4.5,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "flipRotCurve",
+        "target": "",
+        "time": 6.199999809265137,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 1.0,
+        "valueStart": 0.0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "disable",
+        "target": "",
+        "time": 10.710000038146973,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "ShowVAT",
+        "target": "",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "curve": {
+            "data": [
+                0.550000011920929,
+                0.054999999701976776,
+                0.675000011920929,
+                0.1899999976158142
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "sidelit",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.009999999776482582,
+        "valueStart": 10.699999809265137
+    },
+    {
+        "curve": {
+            "data": [
+                0.550000011920929,
+                0.054999999701976776,
+                0.675000011920929,
+                0.1899999976158142
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "lit",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 1.2000000476837158,
+        "valueStart": 6.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.9031470417976379,
+                0.02166666090488434,
+                0.9652103185653687,
+                0.16999998688697815
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "toplit",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 20.0,
+        "valueStart": 0.20000000298023224
+    },
+    {
+        "curve": {
+            "data": [
+                0.550000011920929,
+                0.054999999701976776,
+                0.675000011920929,
+                0.1899999976158142
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "wall",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.009999999776482582,
+        "valueStart": 5.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.6381120085716248,
+                0.12666667997837067,
+                0.6527972221374512,
+                0.7133333086967468
+            ],
+            "type": 10.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "boxSize",
+        "target": "",
+        "time": 10.800000190734863,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 1.0,
+        "valueStart": 0.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.0,
+                0.0,
+                1.0,
+                1.0
+            ],
+            "type": 0.0
+        },
+        "duration": 3.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "mainCardPush",
+        "target": "",
+        "time": 11.199999809265137,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 2.0,
+        "valueStart": 0.0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "HideVAT",
+        "target": "",
+        "time": 12.800000190734863,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "ResumeVAT",
+        "target": "",
+        "time": 30.0,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "curve": {
+            "data": [
+                1.0,
+                0.0,
+                0.0,
+                1.0
+            ],
+            "type": 22.0
+        },
+        "duration": 2.5999999046325684,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "boxSize",
+        "target": "",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.0,
+        "valueStart": 1.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.29475530982017517,
+                0.8216665387153625,
+                0.5421328544616699,
+                0.7899998426437378
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "sidelit",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 10.699999809265137,
+        "valueStart": 0.20000000298023224
+    },
+    {
+        "curve": {
+            "data": [
+                0.41363632678985596,
+                0.8749999403953552,
+                0.675000011920929,
+                0.1899999976158142
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "lit",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 6.0,
+        "valueStart": 1.2000000476837158
+    },
+    {
+        "curve": {
+            "data": [
+                0.4311191141605377,
+                0.9749996662139893,
+                0.5736016631126404,
+                0.7233333587646484
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "toplit",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 0.20000000298023224,
+        "valueStart": 20.0
+    },
+    {
+        "curve": {
+            "data": [
+                0.38216790556907654,
+                0.821666419506073,
+                0.675000011920929,
+                0.1899999976158142
+            ],
+            "type": 3.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "lightIntensity",
+        "target": "wall",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 5.0,
+        "valueStart": 0.10000000149011612
+    },
+    {
+        "curve": {
+            "data": [
+                0.6449999809265137,
+                0.04500000178813934,
+                0.35499998927116394,
+                1.0
+            ],
+            "type": 19.0
+        },
+        "duration": 2.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "curve",
+        "name": "cardBlend",
+        "target": "",
+        "time": 32.79999923706055,
+        "triggerValue": 1.0,
+        "type": 2,
+        "valueEnd": 1.0,
+        "valueStart": 0.0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "HideVAT",
+        "target": "",
+        "time": 33.0,
+        "triggerValue": 1.0,
+        "type": 0
+    },
+    {
+        "duration": 0.0,
+        "enabled": true,
+        "end": 400.0,
+        "evt": "base",
+        "name": "StopFlock",
+        "target": "",
+        "time": 33.0,
+        "triggerValue": 1.0,
+        "type": 0
+    }
+]

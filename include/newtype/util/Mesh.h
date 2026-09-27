@@ -13,7 +13,7 @@ namespace newtype::util {
 	class Mesh {
 	protected:
 		luisa::compute::Mesh					 mMesh;
-		luisa::compute::Buffer<Vertex>			 mVertexBuffer;     // Now uses new Vertex (32 bytes)
+		luisa::compute::Buffer<util::ActiveVertex>	 mVertexBuffer; // A2 active GPU layout
 		luisa::compute::Buffer<luisa::float3>	 mPositionBuffer;    // Legacy position-only buffer
 		luisa::compute::Buffer<uint>			 mMaterialIndices;  // Per-primitive material index
 		bool									 mPacked, mRequirePosBuffer;
@@ -52,7 +52,7 @@ namespace newtype::util {
 		* @brief Get the full vertex buffer with all attributes (position, normal, uv)
 		* @note Uses new Vertex format (32 bytes) from Vertex.h
 		*/
-		[[nodiscard]] luisa::compute::Buffer<Vertex>& vertexBuffer() noexcept { return mVertexBuffer; }
+		[[nodiscard]] luisa::compute::Buffer<util::ActiveVertex>& vertexBuffer() noexcept { return mVertexBuffer; }
 
 		/**
 		* @brief Get legacy position-only vertex buffer

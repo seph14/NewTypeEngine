@@ -2,6 +2,9 @@
 /vc2022/NewTypeEngine
 /vc2022/x64
 /vc2022/build
+/vc2022/NewTypeEngineLib/x64
+/vc2022/NewTypeEngineLib/NewTypeEngineLib
+/dist
 /runtime_shaders/PathTracerShader/.vs
 /runtime_shaders/PathTracerShader/build
 /runtime_shadersbuild/Intermediate/Runtime/PathTracerShader/x64
@@ -26,3 +29,8 @@ design/logo.psd
 .claude/settings.local.json
 /.zcode/crops
 /.zcode/plans
+/resources/models
+/resources/textures
+*.exe
+/tools/upload_alias_repro
+/tools/vmb_repro

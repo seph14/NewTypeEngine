@@ -2,6 +2,7 @@
 #include "newtype/core/FrameContext.h"
 #include "newtype/core/Renderer.h"
 #include "newtype/render/Shading.h"
+#include "newtype/util/Rng.h"
 
 #include <luisa/luisa-compute.h>
 #include <luisa/dsl/sugar.h>
@@ -32,6 +33,10 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 		set_name("relax_prepass");
 		UInt2 pixelPos = dispatch_id().xy();
 		auto c = consts.read(0u);
+		// Compile-time projection tag (§9 perf fix): C++ constant — every
+		// projection condition below folds in DXC, so the perspective build
+		// keeps the pre-projection instruction sequence.
+		const uint bakedProjection = _bakedProjection;
 
 		UInt rectW = cast<uint>(c.gRectSizeX);
 		UInt rectH = cast<uint>(c.gRectSizeY);
@@ -82,19 +87,37 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 		Float3 centerNormal = luisa::compute::normalize(centerNR.xyz() * 2.0f - 1.0f);
 		Float centerRoughness = luisa::compute::fract(centerNR.w);  // unpack roughness from packed matID+roughness
 
-		// Center world position
+		// NRD PrePass clamps the specular hit distance to the denoising range
+		// before use (RELAX_PrePass.cs.hlsl:266).
+		centerSpec.w = luisa::compute::clamp(centerSpec.w, 0.0f, denoisingRange);
+
+		// Center world position — NRD GetCurrentWorldPosFromClipSpaceXY form
+		// (RELAX_Common.hlsli:75-80): viewZ * (fwd + right·cx ± up·cy). NRD's
+		// minus sign assumes its Y-DOWN uv; this engine's texel uv is Y-UP
+		// (row 0 = screen bottom, the same space the TA reconstructs in), so
+		// the faithful engine form is +up·cy with cy = uv·2−1. The former −up
+		// mirrored every reconstructed position about the camera's horizontal
+		// axis (latent: internally-consistent plane gates masked it).
 		Float2 clipXY = (make_float2(pixelPos) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
 		Float3 frustumFwd = c.gFrustumForward.xyz();
 		Float3 frustumRight = c.gFrustumRight.xyz();
 		Float3 frustumUp = c.gFrustumUp.xyz();
-		Float3 rayDir = frustumFwd + frustumRight * clipXY.x - frustumUp * clipXY.y;
-		Float viewZc = centerViewZ / luisa::compute::length(rayDir);
-		Float3 centerWorldPos = viewZc * rayDir;
+		// Point-origin projections: viewZ * pixel-direction(uv) (§5.4).
+		Float3 reconDir = def((frustumFwd + frustumRight * clipXY.x + frustumUp * clipXY.y));
+		if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+		    reconDir = util::eval_point_origin_direction(clipXY,
+		        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+		        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+		}
+		Float3 centerWorldPos = centerViewZ * reconDir;
 
 		Float unproject = c.gUnproject;
 
 		// View vector for specular
 		Float3 V = luisa::compute::normalize(-centerWorldPos);
+		Float NoV = luisa::compute::abs(luisa::compute::dot(centerNormal, V));
 
 		// Specular dominant direction for lobe-aware filtering
 		Float3 dominantDir = luisa::compute::reflect(-V, centerNormal);
@@ -140,11 +163,21 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 		Float diffHdSumW = def(1.0f);
 		Float diffHdSum = centerDiff.w;
 
-		// Accumulation for specular
+		// Accumulation for specular — RGB is a weighted blur; the hit distance is
+		// a MIN over a fixed 1px ring (see the min block below). The former
+		// weighted-average .w systematically OVERSHOT along hit-distance
+		// discontinuities (highlight edges), displacing the virtual-motion ray
+		// beyond the true previous highlight position (RC2); the intermediate
+		// NRD-style wide stochastic min temporally flickered at the same
+		// discontinuities (RC2 follow-up, report §12 R2).
 		Float specSumW = def(1.0f);
 		Float3 specSum = centerSpec.xyz();
-		Float specHdSumW = def(1.0f);
-		Float specHdSum = centerSpec.w;
+		// NRD: specularHitT = (.a == 0) ? gDenoisingRange : .a; minHitT init from it
+		Float specularHitT = ite(centerSpec.w == 0.0f, denoisingRange, centerSpec.w);
+		Float minHitT = specularHitT;
+		// NRD: specMinHitDistanceWeight = (.a == 0) ? 1.0 : gMinHitDistanceWeight * smc
+		Float specMinHitDistanceWeight = ite(centerSpec.w == 0.0f, 1.0f,
+			c.gMinHitDistanceWeight * specMagicCurve);
 
 		Float diffBlurActive = ite(c.gDiffBlurRadius > 0.0f, 1.0f, 0.0f);
 		Float specBlurActive = ite(c.gSpecBlurRadius > 0.0f, 1.0f, 0.0f);
@@ -187,8 +220,16 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 				Int2 samplePosInt = make_int2(pixelPos) +
 					make_int2(cast<int>(rOff.x * pixelRadius),
 						cast<int>(rOff.y * pixelRadius));
-				samplePosInt = clamp(samplePosInt, make_int2(0),
-					make_int2(cast<int>(rectW) - 1, cast<int>(rectH) - 1));
+				if (bakedProjection == 1u | bakedProjection == 2u) {
+					Int wfull = cast<int>(rectW);
+					Int wx = samplePosInt.x - wfull * (samplePosInt.x / wfull);
+					wx = wx + ite(wx < 0, wfull, 0);
+					samplePosInt.x = wx;
+					samplePosInt.y = clamp(samplePosInt.y, 0, cast<int>(rectH) - 1);
+				} else {
+					samplePosInt = clamp(samplePosInt, make_int2(0),
+						make_int2(cast<int>(rectW) - 1, cast<int>(rectH) - 1));
+				}
 				UInt2 sp = make_uint2(samplePosInt);
 
 				Float sampleViewZ = luisa::compute::abs(gIn_ViewZ.read(sp).x);
@@ -199,9 +240,15 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 				Float sampleRoughness = luisa::compute::fract(sampleNR.w);
 
 				Float2 sampleClipXY = (make_float2(sp) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
-				Float3 sampleRayDir = frustumFwd + frustumRight * sampleClipXY.x - frustumUp * sampleClipXY.y;
-				Float sampleViewZc = sampleViewZ / luisa::compute::length(sampleRayDir);
-				Float3 sampleWorldPos = sampleViewZc * sampleRayDir;
+				Float3 reconDir = def((frustumFwd + frustumRight * sampleClipXY.x + frustumUp * sampleClipXY.y));
+				if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+				    reconDir = util::eval_point_origin_direction(sampleClipXY,
+				        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+				        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+				}
+				Float3 sampleWorldPos = sampleViewZ * reconDir;
 
 				Float planeDist = luisa::compute::abs(
 					luisa::compute::dot(sampleWorldPos - centerWorldPos, centerNormal));
@@ -226,12 +273,9 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 				Float4 sampleDiff = io_Diff.read(sp);
 				Float4 sampleSpec = io_Spec.read(sp);
 				Float sampleDiffHd = ite(sampleDiff.w == 0.0f, 1.0f, sampleDiff.w);
-				Float sampleSpecHd = ite(sampleSpec.w == 0.0f, 1.0f, sampleSpec.w);
 
 				Float diffHdW = luisa::compute::exp(
 					-luisa::compute::abs(diffHitDist - sampleDiffHd) / (diffHitDist + 1e-6f) * 4.0f);
-				Float specHdW = luisa::compute::exp(
-					-luisa::compute::abs(specHitDist - sampleSpecHd) / (specHitDist + 1e-6f) * 4.0f);
 
 				Float dw = baseW * diffNormalW * diffHdW;
 				$if(dw > 1e-4f) {
@@ -246,6 +290,17 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 				Float _dR = luisa::compute::saturate(
 					luisa::compute::abs(centerRoughness - sampleRoughness) * roughA);
 				Float roughnessW = 1.0f - _dR * _dR * (3.0f - 2.0f * _dR);
+
+				// (Hit-distance min moved out of this lambda: fixed 1px ring with
+				// deterministic gates — see the min block after the blur loop.)
+
+				// NRD RGB hit-distance weight (RELAX_PrePass.cs.hlsl:355 + Common.hlsli:529-532):
+				// lerp(specMinHitDistanceWeight, 1, ComputeExponentialWeight(sample.a, 9, -9*center.a))
+				// = lerp(floor, 1, 1/(t²+t+1)) with t = 27·|sample.a - center.a|
+				// (ExpApprox(-3·|·|), params a = 1/(1/9) = 9, scale 3).
+				Float hdwT = 27.0f * luisa::compute::abs(sampleSpec.w - centerSpec.w);
+				Float specHdW = luisa::compute::lerp(specMinHitDistanceWeight, 1.0f,
+					1.0f / (hdwT * hdwT + hdwT + 1.0f));
 				Float sw = baseW * specNormalW * specHdW * roughnessW;
 
 				// NRD PrePass: contact-dimming weight (RELAX_PrePass.cs.hlsl:358-362).
@@ -262,8 +317,6 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 				$if(sw > 1e-4f) {
 					specSumW = specSumW + sw;
 					specSum = specSum + sw * sampleSpec.xyz();
-					specHdSumW = specHdSumW + sw;
-					specHdSum = specHdSum + sw * sampleSpecHd;
 				};
 			};
 
@@ -277,14 +330,63 @@ void RelaxDenoiser::compilePrepass(Device& device) {
 			prepassSample(luisa::make_float2(0.850542f, 0.042284f));
 		};
 
+		// Hit-distance min: FIXED 1px ring, deterministic gates. NRD samples the
+		// min over the full rotated blur radius with per-frame stochastic gating
+		// (RELAX_PrePass.cs.hlsl:351-375). At a hit-distance step (a reflected
+		// light edge) that reach spreads the near-side distance a full blur
+		// radius into the field, and the per-frame rotation + gate coin-flips
+		// make the step boundary flicker — TA feeds this field straight into the
+		// virtual-motion ray, so the VMB fetch position jumps several px per
+		// frame at every reflection edge, a band history clamping cannot average
+		// out (report §12 R2: the ring band around the fixture reflection).
+		$if(specBlurActive > 0.0f) {
+			Float minDepthThreshold = c.gDepthThreshold * centerViewZ;
+			Float minCenterMat = luisa::compute::floor(centerNR.w);
+			auto minTap = [&](int dx, int dy) noexcept {
+				Int2 mp = clamp(make_int2(pixelPos) + make_int2(dx, dy),
+					make_int2(0), make_int2(cast<int>(rectW) - 1, cast<int>(rectH) - 1));
+				UInt2 mpp = make_uint2(mp);
+				Float mZ = luisa::compute::abs(gIn_ViewZ.read(mpp).x);
+				$if(mZ > 0.0f & mZ <= denoisingRange) {
+					Float4 mNR = gIn_Normal_Roughness.read(mpp);
+					Float4 mSpec = io_Spec.read(mpp);
+					$if(mSpec.w > 0.0f
+						& luisa::compute::max(luisa::compute::floor(mNR.w), c.gSpecMinMaterial)
+							== luisa::compute::max(minCenterMat, c.gSpecMinMaterial)) {
+					Float2 mClip = (make_float2(mpp) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
+					// The tap's own world position at its own depth — the former
+					// code reused the CENTER's scaled depth along the neighbor ray,
+					// so the plane gate tested a phantom point (NRD PrePass:341
+					// reconstructs each sample at sampleViewZ).
+					Float3 mWorld = mZ
+						* (frustumFwd + frustumRight * mClip.x + frustumUp * mClip.y);
+						Float mPlane = luisa::compute::abs(
+							luisa::compute::dot(mWorld - centerWorldPos, centerNormal));
+						$if(mPlane < minDepthThreshold) {
+							minHitT = luisa::compute::min(minHitT, mSpec.w);
+						};
+					};
+				};
+			};
+			minTap(1, 0);
+			minTap(-1, 0);
+			minTap(0, 1);
+			minTap(0, -1);
+			minTap(1, 1);
+			minTap(-1, -1);
+			minTap(1, -1);
+			minTap(-1, 1);
+		};
+
 		// Normalize and write
 		Float invDiffW = 1.0f / diffSumW;
 		Float invDiffHdW = 1.0f / luisa::compute::max(diffHdSumW, 1e-6f);
 		io_Diff.write(pixelPos, make_float4(diffSum * invDiffW, diffHdSum * invDiffHdW));
 
 		Float invSpecW = 1.0f / specSumW;
-		Float invSpecHdW = 1.0f / luisa::compute::max(specHdSumW, 1e-6f);
-		io_Spec.write(pixelPos, make_float4(specSum * invSpecW, specHdSum * invSpecHdW));
+		// Specular .w is the fixed-ring min (NRD RELAX_PrePass.cs.hlsl:375 analog).
+		Float specHitTOut = ite(minHitT >= denoisingRange, 0.0f, minHitT);
+		io_Spec.write(pixelPos, make_float4(specSum * invSpecW, specHitTOut));
 	});
 }
 }

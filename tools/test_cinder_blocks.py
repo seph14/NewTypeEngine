@@ -2,7 +2,7 @@
 """Tests for tools/cinder_blocks.py.
 
 P1 tests are integration tests against the real Cinder blocks at
-C:\\Users\\barca\\Projects\\CinderHead\\blocks — they pin the parser's
+..\\..\\CinderHead\\blocks — they pin the parser's
 behaviour to actual block metadata so future refactors catch regressions.
 The pinned path here is independent of `cb.DEFAULT_CINDER_BLOCKS_DIR` (which
 points at the runtime Cinder\\blocks tree to match the .props <CinderRoot>):
@@ -41,7 +41,7 @@ from tools import cinder_blocks as cb  # noqa: E402
 # AX-MediaPlayer etc. to exercise every XML variant. The CLI tests below
 # use cb._resolve_blocks_dir(None) which falls through to the runtime
 # default. See the module docstring.
-BLOCKS_DIR = Path(r"C:\Users\barca\Projects\CinderHead\blocks")
+BLOCKS_DIR = Path(r"../../CinderHead/blocks")
 ENGINE_ADDONS_DIR = ENGINE_ROOT / "engine_addons"
 
 
@@ -486,10 +486,14 @@ class TestTextFile(unittest.TestCase):
 
 
 def _generate_project(tmp: Path, name: str) -> Path:
-    """Invoke tools/generate_project.py to create a real project under tmp."""
+    """Invoke tools/generate_project.py to create a real project under tmp.
+
+    Source mode: these tests exercise the addon marker machinery on the
+    copy-tree project layout (the prebuilt default has no engine tree and
+    no addon surface)."""
     subprocess.run(
         [sys.executable, str(ENGINE_ROOT / "tools" / "generate_project.py"),
-         "--path", str(tmp), "--name", name],
+         "--path", str(tmp), "--name", name, "--engine", "source"],
         check=True,
         cwd=ENGINE_ROOT,
         stdout=subprocess.DEVNULL,

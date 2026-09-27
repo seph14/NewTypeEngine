@@ -57,7 +57,7 @@ bool VideoTextureBridge::init(luisa::compute::Device& luDevice,
         luisa::compute::PixelStorage::BYTE4, 1u, &nativeDesc);
 
     _valid = true;
-    CI_LOG_I("VideoTextureBridge: " << width << "x" << height
+    CI_LOG_D("VideoTextureBridge: " << width << "x" << height
              << " Luisa Image<float> wrapped from D3D12 shared resource");
     return true;
 }

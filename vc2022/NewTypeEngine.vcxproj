@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug_Runtime|x64">
@@ -45,6 +45,11 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Centralized compiler blob (defines, includes, options, link deps).
+       Imported before the per-config user sheets so they can override. -->
+  <ImportGroup Label="EngineCommon">
+    <Import Project="EngineCommon.props" />
+  </ImportGroup>
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
     <Import Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" />
@@ -63,28 +68,21 @@
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkIncremental>
   </PropertyGroup>
   <!-- Debug_Runtime ItemDefinitionGroup -->
+  <!-- Links the same static /MDd cinder as Debug (de-shared: the hot-reload
+       boundary only needs the shared LuisaCompute DLLs + /MDd CRT, and
+       shared cinder never exported the D3D12 renderer this app references).
+       Appends the consumer-side RT_RUNTIME define on top of EngineCommon. -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug_Runtime|x64'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0601;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;RT_RUNTIME;CINDER_SHARED;NTDDI_VERSION=0x06010000;$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <PrecompiledHeader>
-      </PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <DisableSpecificWarnings>4244;4267;4068;5105</DisableSpecificWarnings>
+      <AdditionalIncludeDirectories>$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>RT_RUNTIME;$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(CinderInclude);..\include</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>$(CinderLibDebug);d3d12.lib;d3d11.lib;dxgi.lib;dxguid.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;$(LuisaComputeLibDebug)\luisa-dsl.lib;$(LuisaComputeLibDebug)\luisa-xir.lib;$(LuisaComputeLibDebug)\luisa-osl.lib;$(LuisaComputeLibDebug)\luisa-runtime.lib;$(LuisaComputeLibDebug)\luisa-ast.lib;$(LuisaComputeLibDebug)\luisa-core.lib;$(LCSLibDebug)\luisa-compute-solver-lib.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ClingLib)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(EngineLinkDepsDebug);$(LCSLibDebug)\luisa-compute-solver-lib.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
@@ -92,31 +90,21 @@
       </DataExecutionPrevention>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(CinderBinDebug)\cinder.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\d3dcompiler_46.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\libEGL.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\libGLESv2.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_nvrtc.exe" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_embed_device_lib.exe" "$(OutDir)\"</Command>
+      <Command>xcopy /y "$(LuisaComputeBinDebug)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_embed_device_lib.exe" "$(OutDir)\" &amp; xcopy /y "$(FidelityFXBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(DlssBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(SteamAudioBin)\*.dll" "$(OutDir)\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <!-- Debug ItemDefinitionGroup -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0601;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;NTDDI_VERSION=0x06010000;$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
-      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
-      <PrecompiledHeader>
-      </PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <DisableSpecificWarnings>4244;4267;4068;5105</DisableSpecificWarnings>
+      <AdditionalIncludeDirectories>$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(CinderInclude);..\include</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>$(CinderLibDebug);d3d12.lib;d3d11.lib;dxgi.lib;dxguid.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;$(LuisaComputeLibDebug)\luisa-dsl.lib;$(LuisaComputeLibDebug)\luisa-xir.lib;$(LuisaComputeLibDebug)\luisa-osl.lib;$(LuisaComputeLibDebug)\luisa-runtime.lib;$(LuisaComputeLibDebug)\luisa-ast.lib;$(LuisaComputeLibDebug)\luisa-core.lib;$(LCSLibDebug)\luisa-compute-solver-lib.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(EngineLinkDepsDebug);$(LCSLibDebug)\luisa-compute-solver-lib.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
@@ -124,23 +112,14 @@
       </DataExecutionPrevention>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(CinderBinDebug)\cinder.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\d3dcompiler_46.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\libEGL.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinDebug)\libGLESv2.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_nvrtc.exe" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_embed_device_lib.exe" "$(OutDir)\"</Command>
+      <Command>xcopy /y "$(LuisaComputeBinDebug)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinDebug)\luisa_embed_device_lib.exe" "$(OutDir)\" &amp; xcopy /y "$(FidelityFXBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(DlssBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(SteamAudioBin)\*.dll" "$(OutDir)\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <!-- Release ItemDefinitionGroup -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\include;$(CinderInclude);$(CinderIncludeAngle);$(LuisaComputeInclude);$(LuisaComputeSpdlog);$(LuisaComputeXxHash);$(LuisaComputeMagicEnum);$(LuisaComputeEASTL);$(LuisaComputeEABase);$(LuisaComputeReproc);$(LuisaComputeReprocXX);$(LuisaComputeMarl);$(LuisaComputeHalf);$(LuisaComputeStb);$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus /utf-8 /Zc:preprocessor %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;NOMINMAX;_WIN32_WINNT=0x0601;LUISA_PLATFORM_WINDOWS=1;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;SPDLOG_FWRITE_UNLOCKED;SPDLOG_NO_EXCEPTIONS;SPDLOG_NO_THREAD_ID;SPDLOG_DISABLE_DEFAULT_LOGGER;FMT_USE_CONSTEVAL=0;FMT_EXCEPTIONS=0;FMT_HEADER_ONLY=1;FMT_USE_NOEXCEPT=1;XXH_INLINE_ALL;EA_PRAGMA_ONCE_SUPPORTED=1;EA_HAVE_CPP11_CONTAINERS=1;EA_HAVE_CPP11_ATOMIC=1;EA_HAVE_CPP11_CONDITION_VARIABLE=1;EA_HAVE_CPP11_MUTEX=1;EA_HAVE_CPP11_THREAD=1;EA_HAVE_CPP11_FUTURE=1;EA_HAVE_CPP11_TYPE_TRAITS=1;EA_HAVE_CPP11_TUPLES=1;EA_HAVE_CPP11_REGEX=1;EA_HAVE_CPP11_RANDOM=1;EA_HAVE_CPP11_CHRONO=1;EA_HAVE_CPP11_SCOPED_ALLOCATOR=1;EA_HAVE_CPP11_INITIALIZER_LIST=1;EA_HAVE_CPP11_SYSTEM_ERROR=1;EA_HAVE_CPP11_TYPEINDEX=1;EASTL_USER_LITERALS_ENABLED=0;EASTL_STD_ITERATOR_CATEGORY_ENABLED=1;EASTL_STD_TYPE_TRAITS_AVAILABLE=1;EASTL_MOVE_SEMANTICS_ENABLED=1;EASTL_VARIADIC_TEMPLATES_ENABLED=1;EASTL_VARIABLE_TEMPLATES_ENABLED=1;EASTL_INLINE_VARIABLE_ENABLED=1;EASTL_HAVE_CPP11_TYPE_TRAITS=1;EASTL_INLINE_NAMESPACES_ENABLED=1;EASTL_ALLOCATOR_EXPLICIT_ENABLED=1;EA_DLL=1;EASTL_USER_DEFINED_ALLOCATOR=1;EASTL_DEPRECATIONS_FOR_2024_APRIL=EA_DISABLED;REPROC_SHARED;REPROCXX_SHARED;MARL_DLL=1;LUISA_ENABLE_XIR=1;LUISA_ENABLE_DSL=1;_WITH_FMT=;NTDDI_VERSION=0x06010000;$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
-      <PrecompiledHeader>
-      </PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <DisableSpecificWarnings>4244;4267;4068;5105</DisableSpecificWarnings>
+      <AdditionalIncludeDirectories>$(LCSInclude);$(LCSIncludeLcpp);$(LCSIncludeEigen);$(LCSIncludeYyjson);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>$(LCSNoInternalFiberScheduler);%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ProjectReference>
       <LinkLibraryDependencies>true</LinkLibraryDependencies>
@@ -149,7 +128,7 @@
       <AdditionalIncludeDirectories>$(CinderInclude);..\include</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
-      <AdditionalDependencies>$(CinderLibRelease);d3d12.lib;d3d11.lib;dxgi.lib;dxguid.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;$(LuisaComputeLibRelease)\luisa-dsl.lib;$(LuisaComputeLibRelease)\luisa-xir.lib;$(LuisaComputeLibRelease)\luisa-osl.lib;$(LuisaComputeLibRelease)\luisa-runtime.lib;$(LuisaComputeLibRelease)\luisa-ast.lib;$(LuisaComputeLibRelease)\luisa-core.lib;$(LCSLibRelease)\luisa-compute-solver-lib.lib;dbghelp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(EngineLinkDepsRelease);$(LCSLibRelease)\luisa-compute-solver-lib.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <GenerateMapFile>true</GenerateMapFile>
       <SubSystem>Windows</SubSystem>
@@ -161,7 +140,7 @@
       </DataExecutionPrevention>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y "$(CinderBinRelease)\cinder.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinRelease)\d3dcompiler_46.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinRelease)\libEGL.dll" "$(OutDir)\" &amp; xcopy /y "$(CinderBinRelease)\libGLESv2.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinRelease)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinRelease)\luisa_nvrtc.exe" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinRelease)\luisa_embed_device_lib.exe" "$(OutDir)\"</Command>
+      <Command>xcopy /y "$(LuisaComputeBinRelease)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(LuisaComputeBinRelease)\luisa_embed_device_lib.exe" "$(OutDir)\" &amp; xcopy /y "$(FidelityFXBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(DlssBin)\*.dll" "$(OutDir)\" &amp; xcopy /y "$(SteamAudioBin)\*.dll" "$(OutDir)\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -173,12 +152,22 @@
   <ItemGroup>
     <ClCompile Include="..\runtime_shaders\SimpleTestShader\SimpleTestShader.cpp" />
     <ClCompile Include="..\src\NewTypeEngine.cpp" />
-    <ClCompile Include="..\src\tests\LogoScene.cpp" />
+    <ClCompile Include="..\src\tests\HitBug.cpp" />
     <ClCompile Include="..\src\tests\TestScenes.cpp" />
     <ClCompile Include="..\src\tests\CornellBox.cpp" />
+    <ClCompile Include="..\src\tests\TransformTreeTest.cpp" />
+    <ClCompile Include="..\src\tests\AliasTableTest.cpp" />
     <ClCompile Include="..\src\tests\MaterialTest.cpp" />
     <ClCompile Include="..\src\tests\Room.cpp" />
+    <ClCompile Include="..\src\tests\FbxScene.cpp" />
+    <ClCompile Include="..\src\tests\VatScene.cpp" />
+    <ClCompile Include="..\src\tests\TetCageScene.cpp" />
     <ClCompile Include="..\src\newtype\core\DxGLInterop.cpp" />
+    <ClCompile Include="..\src\newtype\core\DxPresent.cpp" />
+    <ClCompile Include="..\src\newtype\upscal\Fsr31Backend.cpp" />
+    <ClCompile Include="..\src\newtype\upscal\DlssSrBackend.cpp" />
+    <ClCompile Include="..\src\newtype\ngx\NgxContext.cpp" />
+    <ClCompile Include="..\src\newtype\ngx\DlssRayReconstruction.cpp" />
     <ClCompile Include="$(CinderRoot)\src\glad\glad.c" />
     <ClCompile Include="..\src\newtype\core\LuisaGLInterop.cpp" />
     <ClCompile Include="..\src\newtype\core\PassDenoiserAtrous.cpp" />
@@ -195,18 +184,25 @@
     <ClCompile Include="..\src\newtype\core\PassDI.cpp" />
     <ClCompile Include="..\src\newtype\render\BSSRDF.cpp" />
     <ClCompile Include="..\src\newtype\render\PassSSS.cpp" />
+    <ClCompile Include="..\src\newtype\render\PassSharc.cpp" />
     <ClCompile Include="..\src\newtype\core\Renderer.cpp" />
     <ClCompile Include="..\src\newtype\core\ShaderManager.cpp" />
     <ClCompile Include="..\src\newtype\feature\DoFFeature.cpp" />
     <ClCompile Include="..\src\newtype\feature\MotionBlurFeature.cpp" />
     <ClCompile Include="..\src\newtype\feature\BloomFeature.cpp" />
     <ClCompile Include="..\src\newtype\feature\ChromaticAberrationFeature.cpp" />
+    <ClCompile Include="..\src\newtype\feature\FxaaFeature.cpp" />
+    <ClCompile Include="..\src\newtype\feature\Gizmo.cpp" />
     <ClCompile Include="..\src\newtype\feature\PointCloud.cpp" />
     <ClCompile Include="..\src\newtype\feature\RasterContext.cpp" />
     <ClCompile Include="..\src\newtype\feature\Trail.cpp" />
     <ClCompile Include="..\src\newtype\media\VideoDecoderD3D11.cpp" />
     <ClCompile Include="..\src\newtype\media\VideoTextureBridge.cpp" />
     <ClCompile Include="..\src\newtype\media\VideoPlayer.cpp" />
+    <ClCompile Include="..\src\newtype\media\VideoAudioStream.cpp" />
+    <ClCompile Include="..\src\newtype\media\VideoAudioNode.cpp" />
+    <ClCompile Include="..\src\newtype\audio\AmbisonicsNodes.cpp" />
+    <ClCompile Include="..\src\newtype\audio\SpatialAudio.cpp" />
     <ClCompile Include="..\src\newtype\plugin\MovieWriter.cpp" />
     <ClCompile Include="..\src\newtype\render\BSDF.cpp" />
     <ClCompile Include="..\src\newtype\render\LightSampler.cpp" />
@@ -215,9 +211,8 @@
     <ClCompile Include="..\src\newtype\render\Sampling.cpp" />
     <ClCompile Include="..\src\newtype\render\TextureConverter.cpp" />
     <ClCompile Include="..\src\newtype\scene\InstancedMesh.cpp" />
-    <!--<ClCompile Include="..\src\newtype\runtime\DLLHotReload.cpp" />-->
-    <!--<ClCompile Include="..\src\newtype\runtime\CallableDLLLoader.cpp" />-->
     <ClCompile Include="..\src\newtype\scene\VoxelGrid.cpp" />
+    <ClCompile Include="..\src\newtype\core\EngineVersion.cpp" />
     <ClCompile Include="..\src\newtype\util\Camera.cpp" />
     <ClCompile Include="..\src\newtype\util\CommandBuffer.cpp" />
     <ClCompile Include="..\src\newtype\util\LutLoader.cpp" />
@@ -226,12 +221,14 @@
     <ClCompile Include="..\src\newtype\scene\Shape.cpp" />
     <ClCompile Include="..\src\newtype\scene\Interaction.cpp" />
     <ClCompile Include="..\src\newtype\scene\MeshShape.cpp" />
+    <ClCompile Include="..\src\newtype\scene\ModelLoader.cpp" />
     <ClCompile Include="..\src\newtype\scene\LightShape.cpp" />
     <ClCompile Include="..\src\newtype\scene\Geometry.cpp" />
     <ClCompile Include="..\src\newtype\scene\DeformableMesh.cpp" />
     <ClCompile Include="..\src\newtype\scene\VATMesh.cpp" />
     <ClCompile Include="..\src\newtype\scene\VATLoader.cpp" />
     <ClCompile Include="..\src\newtype\scene\ProceduralGeometry.cpp" />
+    <ClCompile Include="..\src\newtype\scene\TetCageGeometry.cpp" />
     <ClCompile Include="..\src\newtype\physics\Physics.cpp" />
     <ClCompile Include="..\src\newtype\util\Noise.cpp" />
     <ClCompile Include="..\src\newtype\util\Profiler.cpp" />
@@ -248,19 +245,18 @@
     <ClCompile Include="..\src\newtype\timeline\Timeline.cpp" />
     <ClCompile Include="..\src\newtype\util\Utilities.cpp" />
   </ItemGroup>
-  <!-- Runtime-only files (compiled only when RT_RUNTIME is defined) -->
-  <ItemGroup Condition="'$(Configuration)'=='Debug_Runtime'">
+  <!-- Runtime DLL machinery (compiled into every _DEBUG binary; the guards
+       in the sources key on _DEBUG, matching the prebuilt Debug lib) -->
+  <ItemGroup Condition="'$(Configuration)'!='Release'">
     <ClCompile Include="..\src\newtype\runtime\DLLHotReload.cpp" />
     <ClCompile Include="..\src\newtype\runtime\CallableDLLLoader.cpp" />
   </ItemGroup>
-  <!-- Cinder-Runtime source files (only when RT_RUNTIME is defined) -->
-  <!-- NOTE: Removed - we're using a simpler DLL hot-reload approach instead -->
-  <!-- Runtime shader files: included statically in Debug/Release, referenced as DLL in Debug_Runtime -->
   <!-- Always included headers -->
   <ItemGroup>
     <ClInclude Include="..\include\newtype\core\Config.h" />
     <ClInclude Include="..\src\tests\TestScenes.h" />
     <ClInclude Include="..\include\newtype\core\DxGLInterop.h" />
+    <ClInclude Include="..\include\newtype\core\DxPresent.h" />
     <ClInclude Include="..\include\newtype\core\FeatureContext.h" />
     <ClInclude Include="..\include\newtype\core\FeaturePoint.h" />
     <ClInclude Include="..\include\newtype\core\IFeature.h" />
@@ -271,6 +267,8 @@
     <ClInclude Include="..\include\newtype\feature\MotionBlurFeature.h" />
     <ClInclude Include="..\include\newtype\feature\BloomFeature.h" />
     <ClInclude Include="..\include\newtype\feature\ChromaticAberrationFeature.h" />
+    <ClInclude Include="..\include\newtype\feature\FxaaFeature.h" />
+    <ClInclude Include="..\include\newtype\feature\Gizmo.h" />
     <ClInclude Include="..\include\newtype\feature\PointCloud.h" />
     <ClInclude Include="..\include\newtype\feature\RasterBase.h" />
     <ClInclude Include="..\include\newtype\feature\RasterContext.h" />
@@ -297,9 +295,16 @@
     <ClInclude Include="..\include\newtype\media\VideoDecoderD3D11.h" />
     <ClInclude Include="..\include\newtype\media\VideoTextureBridge.h" />
     <ClInclude Include="..\include\newtype\media\VideoPlayer.h" />
+    <ClInclude Include="..\include\newtype\media\VideoAudioStream.h" />
+    <ClInclude Include="..\include\newtype\media\VideoAudioNode.h" />
+    <ClInclude Include="..\include\newtype\media\AudioRingBuffer.h" />
+    <ClInclude Include="..\include\newtype\audio\AmbisonicsNodes.h" />
+    <ClInclude Include="..\include\newtype\audio\SpatialAudio.h" />
     <ClInclude Include="..\include\newtype\render\MaterialPool.h" />
     <ClInclude Include="..\include\newtype\render\PassDI.h" />
     <ClInclude Include="..\include\newtype\render\PassSSS.h" />
+    <ClInclude Include="..\include\newtype\render\PassSharc.h" />
+    <ClInclude Include="..\include\newtype\render\Sharc.h" />
     <ClInclude Include="..\include\newtype\render\RelaxDenoiser.h" />
     <ClInclude Include="..\include\newtype\render\ReSTIR.h" />
     <ClInclude Include="..\include\newtype\render\Sampling.h" />
@@ -334,6 +339,7 @@
     <ClInclude Include="..\include\newtype\scene\Shape.h" />
     <ClInclude Include="..\include\newtype\scene\Interaction.h" />
     <ClInclude Include="..\include\newtype\scene\MeshShape.h" />
+    <ClInclude Include="..\include\newtype\scene\ModelLoader.h" />
     <ClInclude Include="..\include\newtype\scene\LightShape.h" />
     <ClInclude Include="..\include\newtype\scene\Geometry.h" />
     <ClInclude Include="..\include\newtype\scene\DeformableMesh.h" />
@@ -341,6 +347,7 @@
     <ClInclude Include="..\include\newtype\scene\VATMesh.h" />
     <ClInclude Include="..\include\newtype\scene\VATLoader.h" />
     <ClInclude Include="..\include\newtype\scene\ProceduralGeometry.h" />
+    <ClInclude Include="..\include\newtype\scene\TetCageGeometry.h" />
     <ClInclude Include="..\include\newtype\render\ProceduralTrace.h" />
     <ClInclude Include="..\include\newtype\timeline\EasingCurve.h" />
     <ClInclude Include="..\include\newtype\timeline\Gradient.h" />
@@ -350,17 +357,13 @@
     <ClInclude Include="..\include\newtype\timeline\Timeline.h" />
     <ClInclude Include="..\runtime_shaders\SimpleTestShader\SimpleTestShader.h" />
   </ItemGroup>
-  <!-- Runtime-only headers -->
-  <ItemGroup Condition="'$(Configuration)'=='Debug_Runtime'">
+  <!-- Runtime machinery headers (every _DEBUG config, matching the sources) -->
+  <ItemGroup Condition="'$(Configuration)'!='Release'">
     <ClInclude Include="..\include\newtype\runtime\DLLHotReload.h" />
     <ClInclude Include="..\include\newtype\runtime\Virtual.h" />
     <ClInclude Include="..\include\newtype\runtime\CallableDLLLoader.h" />
+    <ClInclude Include="..\include\newtype\core\EngineVersion.h" />
   </ItemGroup>
-  <!-- Runtime shader headers: always included for interface -->
-  <!--<ItemGroup>
-    <ClInclude Include="..\runtime_shaders\PathTracerShader\PathTracerShader.h" />
-    <ClInclude Include="..\runtime_shaders\PathTracerShader\PathTracerShaderAPI.h" />
-  </ItemGroup>-->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

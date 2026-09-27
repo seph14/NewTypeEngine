@@ -9,6 +9,7 @@
 #include <luisa/luisa-compute.h>
 #include <luisa/runtime/rtx/accel.h>
 #include "cinder/TriMesh.h"
+#include "newtype/core/ShaderManager.h"
 
 // Forward declare struct at global scope for LUISA_STRUCT
 namespace newtype::scene {
@@ -160,24 +161,22 @@ private:
     Buffer<luisa::float3> _deformBaseNormals;    // Undeformed normals per topology
     Buffer<luisa::float2> _procUVs;              // Per-topology static UVs (update-only)
     Buffer<uint> _deformBaseOffsets;              // mesh_id → offset in _deformBasePositions
-    compute::Shader<1,
-        Buffer<luisa::float4>,              // rw: positions (.xyz=pos, .w=uv_u)
-        Buffer<luisa::float4>,              // rw: normals   (.xyz=norm, .w=uv_v)
-        Buffer<AABB>,                        // w: aabb_buffer
-        Buffer<ProcInstanceData>,            // r: instances
-        Buffer<ProcDeformState>,             // r: states
-        Buffer<luisa::float3>,               // r: base_positions
-        Buffer<luisa::float3>,               // r: base_normals
-        Buffer<uint>,                        // r: base_offsets
-        Buffer<compute::Triangle>,           // r: indices
-        Buffer<luisa::float2>,               // r: static_uvs
-        Buffer<ProcMeshMeta>                 // r: mesh_meta (uv_base lookup)
-    > _deformShader;
     uint _deformInstanceCount = 0u;
     uint _deformStartIdx = 0u;               // first type=3 instance after sort
     luisa::vector<uint> _originalToSorted;   // pre-sort idx → post-sort idx
-    luisa::string       _deformShaderId;     // overload deform shader with id for ShaderManager
-    uint                _deformShaderBlock;  // overload deform shader with custom block size
+    core::ShaderHandle<2,
+        Buffer<luisa::float4>,
+        Buffer<luisa::float4>,
+        Buffer<AABB>,
+        Buffer<ProcInstanceData>,
+        Buffer<ProcDeformState>,
+        Buffer<luisa::float3>,
+        Buffer<luisa::float3>,
+        Buffer<uint>,
+        Buffer<compute::Triangle>,
+        Buffer<luisa::float2>,
+        Buffer<ProcMeshMeta>> _deformShader;  // deform shader handle (unset = rest pose)
+    uint                _deformShaderBlock;  // y block size of the deform dispatch
 
     // Source data (all VAT frames, read-only after build)
     Buffer<luisa::float4> _vatAllPositions;  // all frames, .w = uv_u
@@ -243,10 +242,12 @@ public:
                   luisa::float4 rotation = luisa::make_float4(0.f, 0.f, 0.f, 1.f),
                   bool double_sided = false) noexcept;
 
-    /// Convenience: load a single .vat file and register as a VAT mesh.
-    /// Returns (mesh_id, vertex_count, frame_count, tri_count).
+    /// Convenience: load a .vat file (V0 single-topology or V1 packed multi-topology)
+    /// and register each topology as its own VAT mesh.
+    /// Returns one (mesh_id, vertex_count, frame_count, tri_count) per topology;
+    /// empty if loading failed.
     struct VATLoadResult { uint mesh_id; uint vertex_count; uint frame_count; uint tri_count; };
-    VATLoadResult add_vat_from_file(const std::filesystem::path& path) noexcept;
+    [[nodiscard]] luisa::vector<VATLoadResult> add_vat_from_file(const std::filesystem::path& path) noexcept;
 
     /// Override animation state for a specific instance.
     void set_anim_state(uint instance_idx, float fps, float time_offset = 0.0f,
@@ -277,9 +278,48 @@ public:
                                    luisa::span<const ProcDeformState> initial_states = {},
                                    bool double_sided = false) noexcept;
 
-    /// Override deformation state for a specific instance.
+    /// Override deformation state for a specific instance. The state is opaque
+    /// to the engine — the deform shader defines its semantics (the wind sample
+    /// reads params[0] as (time, strength, freq, visibility); a negative
+    /// visibility collapses the instance AABB, hiding it — per-instance toggle,
+    /// the whole procedural primitive is one TLAS instance, so there is no
+    /// per-AABB mask). Without a deform shader (see set_deform_shader_id) the
+    /// states are buffered but never consumed.
     void set_deform_state(uint instance_idx, const ProcDeformState& state) noexcept;
-    /// Override deformation shader with a ID in ShaderManager
+
+    /// Set the deform shader for type-3 instances: an id previously registered
+    /// with core::ShaderManager. Call before build(). With no id set, type-3
+    /// instances render the rest-pose base mesh with static rest AABBs.
+    ///
+    /// Deform shader definition — register a 2-D compute shader with EXACTLY
+    /// these 11 buffer parameters (order matters, it is the dispatch order):
+    ///
+    ///     core::ShaderManager::instance().registerShader<2>(shaderId,
+    ///         [](compute::BufferVar<luisa::float4> positions,        // rw: active positions, .xyz = pos, .w = uv_u
+    ///            compute::BufferVar<luisa::float4> normals,          // rw: active normals,   .xyz = nrm, .w = uv_v
+    ///            compute::BufferVar<compute::AABB> aabbs,            // rw: per-instance AABB rows (collapse = hide)
+    ///            compute::BufferVar<ProcInstanceData> instances,     // r:  instance rows
+    ///            compute::BufferVar<ProcDeformState> states,         // r:  per-deform-instance state (set_deform_state)
+    ///            compute::BufferVar<luisa::float3> base_positions,   // r:  undeformed mesh (slice per topology)
+    ///            compute::BufferVar<luisa::float3> base_normals,     // r:  undeformed normals
+    ///            compute::BufferVar<uint> base_offsets,              // r:  base_positions offset, indexed by
+    ///                                                                  //     inst.mesh_id - vatMeshCount
+    ///            compute::BufferVar<compute::Triangle> indices,      // r:  triangle soup
+    ///            compute::BufferVar<luisa::float2> static_uvs,       // r:  per-topology UVs (base via mesh_meta.uv_base)
+    ///            compute::BufferVar<ProcMeshMeta> mesh_meta) {        // r:  per-topology metadata
+    ///             UInt x = dispatch_id().x;  // deform slot, see below
+    ///             ...
+    ///         });
+    ///
+    /// Dispatch: .dispatch(deformInstanceCount, blockSize) — x is the deform
+    /// instance slot; the instance row lives at instances[deformStart + x]
+    /// (deformStart == 0 on a deform-only geometry). y (blockSize lanes) is
+    /// free for the shader, e.g. to parallelize over vertices. Vertex writes
+    /// target [inst.packed_offsets & 0xFFFF, + inst.vertex_count); triangle
+    /// reads start at inst.packed_offsets >> 16. inst.param carries the
+    /// batch-local instance index from add_deformable_instances() (usable as a
+    /// per-instance phase). Write aabbs[deformStart + x] collapsed
+    /// (min = +1e30, max = -1e30) to hide an instance for the frame.
     void set_deform_shader_id(luisa::string_view shaderId, uint blockSize) noexcept;
 
     // --- Accessors ---

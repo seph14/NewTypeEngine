@@ -20,6 +20,7 @@
 #include "newtype/core/Pipeline.h"
 #include "newtype/scene/VATMesh.h"
 #include "newtype/util/Utilities.h"
+#include "newtype/util/JsonBackup.h"
 #if NT_ENABLE_PROCEDURAL
 #include "newtype/scene/ProceduralGeometry.h"
 #endif
@@ -30,6 +31,7 @@
 #endif
 #include "newtype/util/Noise.h"
 #include "newtype/timeline/Timeline.h"
+#include "newtype/util/SoundController.h"
 
 using namespace luisa;
 using namespace luisa::compute;
@@ -111,13 +113,14 @@ void NewTypeEngine::initGeometries() {
 void NewTypeEngine::saveScene() {
     nlohmann::json file;
     file["camera"] = mCamera->toJson();
+    file["materials"] = mPipeline->captureMaterials();
 #if NT_ALLOW_RASTER_FEATURES
     if(_pc) file["pc"] = _pc->toJson();
 #endif
 
     try {
         auto path = app::getAssetPath("") / "scene.json";
-        ci::writeJson(path, file);
+        util::writeJsonWithBackup(path, file);
         CI_LOG_I("Saved scene to " << path);
     } catch (const std::exception& e) {
         CI_LOG_E("Failed to save scene: " << e.what());
@@ -130,6 +133,8 @@ void NewTypeEngine::loadScene() {
         try {
             auto config = ci::loadJson(path);
             mCamera->load(config["camera"]);
+            if (config.contains("materials"))
+                mPipeline->applyMaterials(config["materials"]);
             CI_LOG_I("Loaded config from " << path);
         } catch (const std::exception& e) {
             CI_LOG_E("Failed to load config: " << e.what());
@@ -169,6 +174,7 @@ void NewTypeEngine::drawUi() {
         ImGui::SetWindowSize(ivec2(320, 500));
         ImGui::SetWindowPos(ivec2(5, 5));
         mPipeline->drawUi();
+        util::SoundController::get().drawUi();
         if (mRenderer->recorder())
             mRenderer->recorder()->drawUi();
     }
@@ -212,7 +218,8 @@ void NewTypeEngine::setup() {
     initFeatures();
     loadScene();
 
-    // Load saved config (parameters, materials, feature toggles)
+    // Load saved engine config (parameters, feature toggles; materials now
+    // load with the scene above)
     mPipeline->loadConfig(app::getAssetPath("config.json"));
     //mCamera->camUi().disable();
 
@@ -234,6 +241,7 @@ void NewTypeEngine::update() {
     }
 
     mCamera->update();
+    util::SoundController::get().update();
     drawUi();
 }
 

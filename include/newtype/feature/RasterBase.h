@@ -60,6 +60,12 @@ public:
         // No-op: RasterContext handles the batch lifecycle.
     }
 
+    /// Hardware rasterization rides the fixed-function perspective clip
+    /// space (view_proj) — cannot express non-linear projections.
+    [[nodiscard]] bool requiresPerspectiveProjection() const noexcept final {
+        return true;
+    }
+
     /// Whether voxelize + raster should run this frame. Default: enabled() && compiled.
     /// Subclasses can override to add particle-count checks etc.
     [[nodiscard]] virtual bool shouldExecute() const { return enabled() && _compiled; }

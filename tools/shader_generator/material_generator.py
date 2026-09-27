@@ -312,6 +312,14 @@ class MaterialGenerator:
             "engine_include_rel": self.engine_include_rel,
             "callables": callables,
             "description": description or f"{shader_name} custom material callables with hot-reload",
+            # PCH payload: the heavy template headers that dominate the TU
+            # compile. Mirrors runtime_shaders/CustomMaterialShader/pch.h.
+            "pch_includes": [
+                f'"{shader_name}API.h"',
+                f'"{self.namespace}/render/Shading.h"',
+                "<luisa/dsl/sugar.h>",
+                "<cstdio>",
+            ],
         }
 
         templates = [
@@ -319,6 +327,8 @@ class MaterialGenerator:
             ("material.h.j2", f"{shader_name}.h"),
             ("materialAPI.h.j2", f"{shader_name}API.h"),
             ("material.cpp.j2", f"{shader_name}.cpp"),
+            ("pch.h.j2", "pch.h"),
+            ("pch.cpp.j2", "pch.cpp"),
         ]
 
         for template_name, output_name in templates:

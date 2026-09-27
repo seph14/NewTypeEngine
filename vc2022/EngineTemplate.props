@@ -2,9 +2,16 @@
 <!--
   Engine-wide MSBuild properties template.
 
-  Used by tools/generate_project.py for freshly-generated user projects.
-  Contains only the core engine dependencies (Cinder + LuisaCompute + Cling
-  placeholder + PlatformToolset). Optional features like LuisaComputeSimulator
+  Used by tools/generate_project.py for freshly-generated source-mode
+  projects. Contains only the core engine dependencies (Cinder + LuisaCompute
+  + PlatformToolset); the compile/link blob itself lives in the generated
+  project's vc2022/EngineCommon.props copy. The CINDER_LIBS placeholder line
+  below is substituted by the generator with either the dll or the static
+  cinder lib block (PROPS_CINDER_DLL / PROPS_CINDER_STATIC in
+  generate_project.py), selected via its "link" option. CinderBin* remain for
+  the dll link mode's post-build cinder.dll copies (static mode and
+  Debug_Runtime never copy cinder DLLs).
+  Optional features like LuisaComputeSimulator
   (sim addon) and the D3D11 to D3D12 video bridge (video addon) are NOT
   baked in here. Install them via tools/cinder_blocks.py with the project
   flag pointing at the consumer project root:
@@ -23,8 +30,7 @@
     <CinderRoot>..\..\Cinder</CinderRoot>
     <CinderInclude>$(CinderRoot)\include</CinderInclude>
     <CinderIncludeAngle>$(CinderRoot)\include\ANGLE</CinderIncludeAngle>
-    <CinderLibDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143\cinder.lib</CinderLibDebug>
-    <CinderLibRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143\cinder.lib</CinderLibRelease>
+    @CINDER_LIBS@
     <CinderBinDebug>$(CinderRoot)\lib\msw\x64\Debug_Shared\v143</CinderBinDebug>
     <CinderBinRelease>$(CinderRoot)\lib\msw\x64\Release_Shared\v143</CinderBinRelease>
 
@@ -52,7 +58,38 @@
     <LuisaComputeBinDebug>$(LuisaComputeRoot)\build-dx-debug\bin</LuisaComputeBinDebug>
     <LuisaComputeBinRelease>$(LuisaComputeRoot)\build-dx\bin</LuisaComputeBinRelease>
 
+    <!-- FidelityFX SDK (vendored subset — external/FidelityFX/README.md).
+         Header-only compile-time dependency of the FSR 3.1 upscaler backend
+         (Fsr31Backend.cpp); the runtime DLLs are loaded dynamically, never
+         linked. Anchored at this sheet's own directory: same relative layout
+         in the engine checkout and in generated projects (the generator
+         copies the SDK next to the engine copy). -->
+    <FidelityFXRoot>$(MSBuildThisFileDirectory)..\external\FidelityFX</FidelityFXRoot>
+    <FidelityFXInclude>$(FidelityFXRoot)\include</FidelityFXInclude>
+    <FidelityFXBin>$(FidelityFXRoot)\bin</FidelityFXBin>
+
+    <!-- Steam Audio SDK (vendored subset — external/Valve/SteamAudio/README.md).
+         phonon C API for the spatial audio system (newtype/audio); phonon.dll
+         is copied next to the exe by the post-build step. -->
+    <SteamAudioRoot>$(MSBuildThisFileDirectory)..\external\Valve\SteamAudio</SteamAudioRoot>
+    <SteamAudioInclude>$(SteamAudioRoot)\include</SteamAudioInclude>
+    <SteamAudioLib>$(SteamAudioRoot)\lib\x64\phonon.lib</SteamAudioLib>
+    <SteamAudioBin>$(SteamAudioRoot)\bin</SteamAudioBin>
+
+    <!-- Cling Paths (for runtime shader compilation) -->
+    <!--
+    <ClingRoot>$(ProjectDir)dependencies\Cling</ClingRoot>
+    <ClingInclude>$(ClingRoot)\include</ClingInclude>
+    <ClingLib>$(ClingRoot)\lib</ClingLib>
+    <ClingBin>$(ClingRoot)\bin</ClingBin>
+    -->
+
     <!-- Platform Toolset -->
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
+  <!--
+  <PropertyGroup Label="UserMacros">
+    <CinderRtInclude>$(ProjectDir)dependencies\Cinder-Runtime\include</CinderRtInclude>
+  </PropertyGroup>
+  -->
 </Project>

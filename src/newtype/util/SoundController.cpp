@@ -6,6 +6,7 @@
 #include "cinder/Log.h"
 #include "cinder/Utilities.h"
 #include "cinder/app/App.h"
+#include "newtype/audio/SpatialAudio.h"
 #include "newtype/util/Rand.h"
 #include <algorithm>
 #include <cctype>
@@ -33,9 +34,18 @@ bool isAudioFile(const fs::path& p) {
 // ============================================================================
 
 SoundController::SoundController() {
-    auto ctx    = audio::Context::master();
-    _output     = ctx->getOutput();
-    ctx->enable();
+    // Machines without an audio output device (headless / remote sessions)
+    // must degrade to silent operation, not abort the engine.
+    try {
+        auto ctx    = ci::audio::Context::master();
+        _output     = ctx->getOutput();
+        ctx->enable();
+        _audioAvailable = true;
+    }
+    catch (const std::exception& e) {
+        CI_LOG_W("SoundController: no audio output available - running silent ("
+                 << e.what() << ")");
+    }
 }
 
 SoundController::~SoundController() {
@@ -57,7 +67,7 @@ SoundController::~SoundController() {
 
 void SoundController::setSoundLevel(float level) { _level = level; }
 
-void SoundController::setOutput(audio::NodeRef node) {
+void SoundController::setOutput(ci::audio::NodeRef node) {
     if (node) _output = node;
 }
 
@@ -69,6 +79,7 @@ void SoundController::update() {
                 node.level -= def.fadeRate;
                 if (node.level < 0.f) {
                     node.node->stop();
+                    if (node.spatialEncoder) node.spatialEncoder->disconnectAll();
                     node.gain->disconnectAll();
                     node.node->disconnectAll();
                     it = def.active.erase(it);
@@ -86,17 +97,22 @@ void SoundController::update() {
 // ============================================================================
 
 void SoundController::playBackgroundTrack(const fs::path& assetPath, float level) {
+    playBackgroundTrack(app::loadAsset(assetPath), level);
+}
+
+void SoundController::playBackgroundTrack(const ci::DataSourceRef& source, float level) {
+    if (!_audioAvailable) return;
     // Tear down any existing BGM graph first (ref silently leaked the old one).
     if (_bgm.node) { _bgm.node->stop(); _bgm.node->disconnectAll(); _bgm.node.reset(); }
     if (_bgm.gain) { _bgm.gain->disconnectAll();                    _bgm.gain.reset(); }
 
-    auto ctx = audio::Context::master();
-    auto src = audio::load(app::loadAsset(assetPath), ctx->getSampleRate());
+    auto ctx = ci::audio::Context::master();
+    auto src = ci::audio::load(source, ctx->getSampleRate());
     auto buf = src->loadBuffer();
 
-    _bgm.node = ctx->makeNode(new audio::BufferPlayerNode(buf));
+    _bgm.node = ctx->makeNode(new ci::audio::BufferPlayerNode(buf));
     _bgm.node->setLoopEnabled(true);
-    _bgm.gain = ctx->makeNode(new audio::GainNode(_level * level));
+    _bgm.gain = ctx->makeNode(new ci::audio::GainNode(_level * level));
     _bgm.node >> _bgm.gain >> _output;
     _bgm.level    = level;
     _bgm.autoFade = false;
@@ -128,14 +144,19 @@ void SoundController::registerEffect(const string& id, float fadeRate) {
 }
 
 void SoundController::addEffectTrack(const string& id, const fs::path& assetPath) {
+    addEffectTrack(id, app::loadAsset(assetPath));
+}
+
+void SoundController::addEffectTrack(const string& id, const ci::DataSourceRef& source) {
+    if (!_audioAvailable) return;
     auto it = _effects.find(id);
     if (it == _effects.end()) {
-        CI_LOG_W("SoundController::addEffectTrack — effect '" << id
+        CI_LOG_W("SoundController::addEffectTrack - effect '" << id
                  << "' not registered. Call registerEffect first.");
         return;
     }
-    auto ctx = audio::Context::master();
-    auto src = audio::load(app::loadAsset(assetPath), ctx->getSampleRate());
+    auto ctx = ci::audio::Context::master();
+    auto src = ci::audio::load(source, ctx->getSampleRate());
     it->second.buffers.push_back(src->loadBuffer());
 }
 
@@ -144,7 +165,7 @@ void SoundController::loadEffectFolder(const string& id, float fadeRate,
     registerEffect(id, fadeRate);
     auto root = app::getAssetPath(folder);
     if (!fs::exists(root) || !fs::is_directory(root)) {
-        CI_LOG_W("SoundController::loadEffectFolder — '" << root
+        CI_LOG_W("SoundController::loadEffectFolder - '" << root
                  << "' is not a directory.");
         return;
     }
@@ -157,11 +178,12 @@ void SoundController::loadEffectFolder(const string& id, float fadeRate,
 }
 
 void SoundController::loadConfig(const fs::path& jsonPath) {
+    if (!_audioAvailable) return;
     Json j;
     try {
         j = Json::parse(loadString(app::loadAsset(jsonPath)));
     } catch (const std::exception& ex) {
-        CI_LOG_EXCEPTION("SoundController::loadConfig — parse failed for "
+        CI_LOG_EXCEPTION("SoundController::loadConfig - parse failed for "
                          + jsonPath.string(), ex);
         return;
     }
@@ -193,20 +215,46 @@ void SoundController::loadConfig(const fs::path& jsonPath) {
 // ============================================================================
 
 void SoundController::playEffect(const string& id, int uid, float level) {
+    playEffectInternal(id, uid, level, nullptr);
+}
+
+void SoundController::playEffect(const string& id, int uid, float level,
+                                 const ci::vec3& worldPos) {
+    playEffectInternal(id, uid, level, &worldPos);
+}
+
+void SoundController::playEffectInternal(const string& id, int uid, float level,
+                                         const ci::vec3* worldPos) {
+    if (!_audioAvailable) return;
     auto it = _effects.find(id);
     if (it == _effects.end() || it->second.buffers.empty()) return;
     auto& def = it->second;
     if (def.active.find(uid) != def.active.end()) return;
 
     auto idx = Rand::randInt(static_cast<int32_t>(def.buffers.size()));
-    auto ctx = audio::Context::master();
+    auto ctx = ci::audio::Context::master();
 
     SoundEffectNode node;
-    node.node = ctx->makeNode(new audio::BufferPlayerNode(def.buffers[idx]));
+    node.node = ctx->makeNode(new ci::audio::BufferPlayerNode(def.buffers[idx]));
     node.node->setName(id + ":" + to_string(uid));
     node.node->setLoopEnabled(false);
-    node.gain = ctx->makeNode(new audio::GainNode(_level * level));
-    node.node >> node.gain >> _output;
+    node.gain = ctx->makeNode(new ci::audio::GainNode(_level * level));
+    node.node >> node.gain;
+
+    // Spatial route: gain >> ambisonics encoder >> binaural bus. Ambisonic
+    // encoding carries no distance, so the inverse-distance gain rides the
+    // voice gain node (multiplied into every auto-fade update below).
+    if (worldPos) {
+        auto& spatial = audio::SpatialAudioSystem::get();
+        node.spatialEncoder = spatial.addSource(node.gain, *worldPos);
+        if (node.spatialEncoder) {
+            node.gain->setValue(_level * level * spatial.distanceGain(*worldPos));
+            node.isSpatial = true;
+        }
+    }
+    if (!node.isSpatial)
+        node.gain >> _output;
+
     node.level    = level;
     node.autoFade = true;
     node.node->start();
@@ -234,6 +282,13 @@ bool SoundController::isPlaying(const string& id, int uid) const {
 void SoundController::drawUi() {
     if (!ImGui::CollapsingHeader("Sound Controller")) return;
     ImGui::ScopedId scpId("snd");
+
+#if NT_ENABLE_SPATIAL_AUDIO
+    // Spatial section first: the listener readout + test tone live here, and
+    // the buttons below ("Play random spatial") depend on its state.
+    audio::SpatialAudioSystem::get().drawUi();
+    ImGui::Separator();
+#endif
 
     // ----- BGM transport -----
     if (ImGui::CollapsingHeader("BGM", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -263,6 +318,14 @@ void SoundController::drawUi() {
 
         if (!def.buffers.empty()) {
             if (ImGui::Button("Play random")) playEffect(id, _testUid++, 1.0f);
+#if NT_ENABLE_SPATIAL_AUDIO
+            ImGui::SameLine();
+            if (ImGui::Button("Play random spatial")) {
+                auto& spatial = audio::SpatialAudioSystem::get();
+                playEffect(id, _testUid++, 1.0f,
+                           spatial.listenerPosition() + spatial.listenerAhead() * 2.f);
+            }
+#endif
         }
 
         // Snapshot the uid list — erase happens inside the loop buttons below.
@@ -276,8 +339,9 @@ void SoundController::drawUi() {
             if (it == def.active.end()) continue;
             auto& n = it->second;
 
-            ImGui::Text("uid=%d  lvl=%.2f%s",
-                        uid, n.level, n.autoFade ? "  (fading)" : "");
+            ImGui::Text("uid=%d  lvl=%.2f%s%s",
+                        uid, n.level, n.autoFade ? "  (fading)" : "",
+                        n.isSpatial ? "  (spatial)" : "");
             ImGui::SameLine();
             if (ImGui::SmallButton("Stop")) fadeOutEffect(id, uid);
         }

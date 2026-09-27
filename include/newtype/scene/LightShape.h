@@ -21,11 +21,20 @@ using namespace luisa;
  */
 class LightShape : public MeshShape {
 public:
-    LightShape(Device &device, uint material_id) noexcept
+    /// render_geometry = false: a light that illuminates but never renders —
+    /// camera-path rays (G-buffer primary, mirror reflections, glass tint
+    /// replay) pass through it (PROPERTY_INVISIBLE_TO_CAMERA); light
+    /// sampling, shadow, and GI rays are unaffected. Toggle at runtime via
+    /// Pipeline::setShapeCameraVisibility.
+    LightShape(Device &device, uint material_id,
+               bool render_geometry = true) noexcept
         : MeshShape(device, material_id) {
 
         // Mark as light in properties
         _properties |= PROPERTY_HAS_LIGHT;
+        if (!render_geometry) {
+            _properties |= PROPERTY_INVISIBLE_TO_CAMERA;
+        }
     }
 };
 
@@ -36,9 +45,9 @@ typedef luisa::unique_ptr<LightShape> LightShapePtr;
  */
 inline luisa::unique_ptr<LightShape> make_light(
     Device &device, ci::TriMesh &triMesh,
-    uint material_id) noexcept
+    uint material_id, bool render_geometry = true) noexcept
 {
-    auto light = luisa::make_unique<LightShape>(device, material_id);
+    auto light = luisa::make_unique<LightShape>(device, material_id, render_geometry);
     light->load_from(triMesh);
     return light;
 }

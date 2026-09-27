@@ -41,6 +41,10 @@ void RelaxDenoiser::compileAtrous(Device& device) {
 
 		UInt2 pixelPos = dispatch_id().xy();
 		auto c = consts.read(0u);
+		// Compile-time projection tag (§9 perf fix): C++ constant — every
+		// projection condition below folds in DXC, so the perspective build
+		// keeps the pre-projection instruction sequence.
+		const uint bakedProjection = _bakedProjection;
 
 		UInt rectW = cast<uint>(c.gRectSizeX);
 		UInt rectH = cast<uint>(c.gRectSizeY);
@@ -133,10 +137,23 @@ void RelaxDenoiser::compileAtrous(Device& device) {
 		Float3 frustumFwd = c.gFrustumForward.xyz();
 		Float3 frustumRight = c.gFrustumRight.xyz();
 		Float3 frustumUp = c.gFrustumUp.xyz();
-		Float3 rayDir = frustumFwd + frustumRight * clipXY.x - frustumUp * clipXY.y;
-		Float viewZc = centerViewZ / luisa::compute::length(rayDir);
-		Float3 centerWorldPos = viewZc * rayDir;
-		Float3 centerV = -centerWorldPos / centerViewZ;
+		// True-point reconstruction: viewZ * (fwd + right*cx + up*cy) — the
+		// inverse of Camera::generate_ray; Y-UP texel uv so +cy on the up term
+		// (the former -up mirrored positions; the viewZ/|rayDir| form was
+		// ray-distance semantics, inconsistent with the z-depth viewZ the
+		// TA/PrePass store). centerV must stay unit for the angle gates.
+		// Point-origin projections: viewZ * pixel-direction(uv), exact under
+		// the same relative-position semantics.
+		Float3 reconDir = def((frustumFwd + frustumRight * clipXY.x + frustumUp * clipXY.y));
+		if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+		    reconDir = util::eval_point_origin_direction(clipXY,
+		        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+		        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+		}
+		Float3 centerWorldPos = centerViewZ * reconDir;
+		Float3 centerV = -luisa::compute::normalize(centerWorldPos);
 
 		// NRD RELAX_Atrous.cs.hlsl:133 — depth threshold is gDepthThreshold * centerViewZ.
 		// Invented stepSize*3 floor removed: it widened the binary plane-distance test
@@ -189,7 +206,16 @@ void RelaxDenoiser::compileAtrous(Device& device) {
 					make_int2(i * cast<int>(stepSize),
 						j * cast<int>(stepSize));
 
-				samplePosInt = clamp(samplePosInt, make_int2(0), make_int2(rectWint, rectHint));
+				// Equirect/cylindrical: wrap the u axis across the pano seam
+				// instead of clamping (edge duplication would smear the seam).
+				if (bakedProjection == 1u | bakedProjection == 2u) {
+					Int wx = samplePosInt.x - rectWint * (samplePosInt.x / rectWint);
+					wx = wx + ite(wx < 0, rectWint, 0);
+					samplePosInt.x = wx;
+					samplePosInt.y = clamp(samplePosInt.y, 0, rectHint);
+				} else {
+					samplePosInt = clamp(samplePosInt, make_int2(0), make_int2(rectWint, rectHint));
+				}
 				UInt2 sp = make_uint2(samplePosInt);
 
 				Float sampleViewZ = luisa::compute::abs(gIn_ViewZ.read(sp).x);
@@ -203,9 +229,15 @@ void RelaxDenoiser::compileAtrous(Device& device) {
 				Float sampleRoughness  = sampleNR.w - sampleMaterialID;
 
 				Float2 sampleClipXY = (make_float2(sp) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
-				Float3 sampleRayDir = frustumFwd + frustumRight * sampleClipXY.x - frustumUp * sampleClipXY.y;
-				Float sampleViewZc = sampleViewZ / luisa::compute::length(sampleRayDir);
-				Float3 sampleWorldPos = sampleViewZc * sampleRayDir;
+				Float3 reconDir = def((frustumFwd + frustumRight * sampleClipXY.x + frustumUp * sampleClipXY.y));
+				if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+				    reconDir = util::eval_point_origin_direction(sampleClipXY,
+				        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+				        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+				}
+				Float3 sampleWorldPos = sampleViewZ * reconDir;
 
 				Float planeDist = luisa::compute::abs(
 					luisa::compute::dot(sampleWorldPos - centerWorldPos, centerNormal));
@@ -345,13 +377,22 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 		constexpr uint TILE_TOTAL = T * T;   // 144
 		constexpr uint BLOCK_TOTAL = B * B;  // 64
 
-		Shared<float> nrTile(TILE_TOTAL * 4u);
+		// R3 wave/smem pass: vector tiles — one float4 element per cell instead
+		// of 4 scalar floats (Shared<float4> is a native LC type). Same values,
+		// same total footprint; 1 vector store/load per cell instead of 4
+		// scalar ops, and the consecutive-float4 access pattern is bank-
+		// conflict-free by construction (the scalar ×4 layout paid 2-way
+		// conflicts on the wrap groups of the 12-wide tap reads). vz stays
+		// scalar (1 channel).
+		Shared<float4> nrTile(TILE_TOTAL);
 		Shared<float> vzTile(TILE_TOTAL);
-		Shared<float> diffTile(TILE_TOTAL * 4u);
-		Shared<float> specTile(TILE_TOTAL * 4u);
+		Shared<float4> diffTile(TILE_TOTAL);
+		Shared<float4> specTile(TILE_TOTAL);
 
 		UInt2 pixelPos = dispatch_id().xy();
 		auto c = consts.read(0u);
+		// Compile-time projection tag (§9 perf fix) — see compileAtrous.
+		const uint bakedProjection = _bakedProjection;
 
 		UInt rectW = cast<uint>(c.gRectSizeX);
 		UInt rectH = cast<uint>(c.gRectSizeY);
@@ -360,6 +401,19 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 
 		UInt2 gid = block_id().xy();
 		UInt flat_tid = pixelPos.x % B + (pixelPos.y % B) * B;
+
+		// Block-uniform sky-tile early out BEFORE the cooperative preload
+		// (NRD PRELOAD_INTO_SMEM_WITH_TILE_CHECK pattern): an 8x8 block lies
+		// inside a single 16x16 tile, so the branch cannot diverge within the
+		// block and the 144-cell preload + sync_block are skipped for all-sky
+		// tiles. Bare return — sky texels stay unwritten in the ping-pong
+		// buffer and every consumer rejects viewZ > range taps. Only the sky
+		// half of the former combined gate moved up; the per-pixel bounds
+		// half must stay below the preload/sync (edge blocks are not
+		// block-uniform and must not skip the barrier).
+		$if(Expr{ gIn_Tiles.read(pixelPos >> 4u).x != 0.0f }) {
+			$return();
+		};
 
 		// Cooperative preload: 64 threads load 144 entries in 2 stages
 		$for(stage, 3u) {
@@ -374,29 +428,20 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					cast<UInt>(max(gyy, 0)));
 				sp = min(sp, make_uint2(rectW - 1u, rectH - 1u));
 				Float4 nr = gIn_Normal_Roughness.read(sp);
-				nrTile.write(si * 4u + 0u, nr.x);
-				nrTile.write(si * 4u + 1u, nr.y);
-				nrTile.write(si * 4u + 2u, nr.z);
-				nrTile.write(si * 4u + 3u, nr.w);
+				nrTile.write(si, nr);
 				Float vz = gIn_ViewZ.read(sp).x;
 				vzTile.write(si, vz);
 				Float4 d = in_Diff.read(sp);
-				diffTile.write(si * 4u + 0u, d.x);
-				diffTile.write(si * 4u + 1u, d.y);
-				diffTile.write(si * 4u + 2u, d.z);
-				diffTile.write(si * 4u + 3u, d.w);
+				diffTile.write(si, d);
 				Float4 s = in_Spec.read(sp);
-				specTile.write(si * 4u + 0u, s.x);
-				specTile.write(si * 4u + 1u, s.y);
-				specTile.write(si * 4u + 2u, s.z);
-				specTile.write(si * 4u + 3u, s.w);
+				specTile.write(si, s);
 			};
 		};
 		sync_block();
 
-		// Tile-based early out
-		UInt2 tilePos = pixelPos >> 4u;
-		$if(Expr{ gIn_Tiles.read(tilePos).x != 0.0f } | pixelPos.x >= rectW | pixelPos.y >= rectH) {
+		// Out-of-rect threads (bounds half of the former combined gate — kept
+		// after the preload for barrier uniformity).
+		$if(pixelPos.x >= rectW | pixelPos.y >= rectH) {
 			$return();
 		};
 
@@ -410,9 +455,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 			$return();
 		};
 
-		Float4 centerNR = make_float4(
-			nrTile.read(cIdx * 4u + 0u), nrTile.read(cIdx * 4u + 1u),
-			nrTile.read(cIdx * 4u + 2u), nrTile.read(cIdx * 4u + 3u));
+		Float4 centerNR = nrTile.read(cIdx);
 		Float3 centerNormal = luisa::compute::normalize(centerNR.xyz() * 2.0f - 1.0f);
 		Float centerPackedNR   = centerNR.w;
 		Float centerMaterialID = luisa::compute::floor(centerPackedNR);
@@ -423,15 +466,11 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 		Float specConf = _hlRead2.y;
 
 		// Center diffuse + variance (from smem)
-		Float4 centerDiff = make_float4(
-			diffTile.read(cIdx * 4u + 0u), diffTile.read(cIdx * 4u + 1u),
-			diffTile.read(cIdx * 4u + 2u), diffTile.read(cIdx * 4u + 3u));
+		Float4 centerDiff = diffTile.read(cIdx);
 		Float centerLum = luminance(centerDiff.xyz());
 		Float centerVar = centerDiff.w;
 		// Center specular (from smem)
-		Float4 centerSpec = make_float4(
-			specTile.read(cIdx * 4u + 0u), specTile.read(cIdx * 4u + 1u),
-			specTile.read(cIdx * 4u + 2u), specTile.read(cIdx * 4u + 3u));
+		Float4 centerSpec = specTile.read(cIdx);
 		Float centerSpecLum = luminance(centerSpec.xyz());
 
 		// === Spatial Variance Estimation (5x5) for early-history pixels ===
@@ -459,9 +498,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					Int ssy = cy + sdy;
 					UInt ssIdx = cast<UInt>(ssx) + cast<UInt>(ssy) * T;
 
-					Float4 sampleNR = make_float4(
-						nrTile.read(ssIdx * 4u + 0u), nrTile.read(ssIdx * 4u + 1u),
-						nrTile.read(ssIdx * 4u + 2u), nrTile.read(ssIdx * 4u + 3u));
+					Float4 sampleNR = nrTile.read(ssIdx);
 					Float3 sampleNormal = luisa::compute::normalize(sampleNR.xyz() * 2.0f - 1.0f);
 					Float sampleMaterialID = luisa::compute::floor(sampleNR.w);
 
@@ -477,9 +514,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					Bool diffMatOK = luisa::compute::max(centerMaterialID, c.gDiffMinMaterial)
 						== luisa::compute::max(sampleMaterialID, c.gDiffMinMaterial);
 					Float dw = normalW * ite(diffMatOK, 1.0f, 0.0f);
-					Float4 sampleDiff = make_float4(
-						diffTile.read(ssIdx * 4u + 0u), diffTile.read(ssIdx * 4u + 1u),
-						diffTile.read(ssIdx * 4u + 2u), diffTile.read(ssIdx * 4u + 3u));
+					Float4 sampleDiff = diffTile.read(ssIdx);
 					Float sampleDiffLum = luminance(sampleDiff.xyz());
 					sumDiffW   = sumDiffW   + dw;
 					sumDiffRad = sumDiffRad + dw * sampleDiff.xyz();
@@ -490,9 +525,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					Bool specMatOK = luisa::compute::max(centerMaterialID, c.gSpecMinMaterial)
 						== luisa::compute::max(sampleMaterialID, c.gSpecMinMaterial);
 					Float sw = normalW * ite(specMatOK, 1.0f, 0.0f);
-					Float4 sampleSpec = make_float4(
-						specTile.read(ssIdx * 4u + 0u), specTile.read(ssIdx * 4u + 1u),
-						specTile.read(ssIdx * 4u + 2u), specTile.read(ssIdx * 4u + 3u));
+					Float4 sampleSpec = specTile.read(ssIdx);
 					Float sampleSpecLum = luminance(sampleSpec.xyz());
 					sumSpecW   = sumSpecW   + sw;
 					sumSpecRad = sumSpecRad + sw * sampleSpec.xyz();
@@ -577,10 +610,23 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 		Float3 frustumFwd = c.gFrustumForward.xyz();
 		Float3 frustumRight = c.gFrustumRight.xyz();
 		Float3 frustumUp = c.gFrustumUp.xyz();
-		Float3 rayDir = frustumFwd + frustumRight * clipXY.x - frustumUp * clipXY.y;
-		Float viewZc = centerViewZ / luisa::compute::length(rayDir);
-		Float3 centerWorldPos = viewZc * rayDir;
-		Float3 centerV = -centerWorldPos / centerViewZ;
+		// True-point reconstruction: viewZ * (fwd + right*cx + up*cy) — the
+		// inverse of Camera::generate_ray; Y-UP texel uv so +cy on the up term
+		// (the former -up mirrored positions; the viewZ/|rayDir| form was
+		// ray-distance semantics, inconsistent with the z-depth viewZ the
+		// TA/PrePass store). centerV must stay unit for the angle gates.
+		// Point-origin projections: viewZ * pixel-direction(uv), exact under
+		// the same relative-position semantics.
+		Float3 reconDir = def((frustumFwd + frustumRight * clipXY.x + frustumUp * clipXY.y));
+		if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+		    reconDir = util::eval_point_origin_direction(clipXY,
+		        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+		        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+		}
+		Float3 centerWorldPos = centerViewZ * reconDir;
+		Float3 centerV = -luisa::compute::normalize(centerWorldPos);
 
 		// NRD RELAX_Atrous.cs.hlsl:133 — depth threshold is gDepthThreshold * centerViewZ
 		// (matches _relaxAtrous; the invented stepSize*3 floor widened the binary
@@ -632,6 +678,11 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					make_int2(i * cast<int>(stepSize),
 						j * cast<int>(stepSize));
 
+				// Plain clamp — seam-wrap projections (equirect/cylindrical)
+				// never dispatch this smem variant: a wrapped u tap lands
+				// across the image, outside the block halo, and the smem coord
+				// clamp below would read the wrong texel (see the routing in
+				// PassDenoiser::render).
 				samplePosInt = clamp(samplePosInt, make_int2(0), make_int2(rectWint, rectHint));
 				UInt2 sp = make_uint2(samplePosInt);
 
@@ -648,17 +699,21 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 					$continue;
 				};
 
-				Float4 sampleNR = make_float4(
-					nrTile.read(sIdx * 4u + 0u), nrTile.read(sIdx * 4u + 1u),
-					nrTile.read(sIdx * 4u + 2u), nrTile.read(sIdx * 4u + 3u));
+				Float4 sampleNR = nrTile.read(sIdx);
 				Float3 sampleNormal = luisa::compute::normalize(sampleNR.xyz() * 2.0f - 1.0f);
 				Float sampleMaterialID = luisa::compute::floor(sampleNR.w);
 				Float sampleRoughness  = sampleNR.w - sampleMaterialID;
 
 				Float2 sampleClipXY = (make_float2(sp) + 0.5f) * rectSizeInv * 2.0f - 1.0f;
-				Float3 sampleRayDir = frustumFwd + frustumRight * sampleClipXY.x - frustumUp * sampleClipXY.y;
-				Float sampleViewZc = sampleViewZ / luisa::compute::length(sampleRayDir);
-				Float3 sampleWorldPos = sampleViewZc * sampleRayDir;
+				Float3 reconDir = def((frustumFwd + frustumRight * sampleClipXY.x + frustumUp * sampleClipXY.y));
+				if (bakedProjection != 0u) {
+			// Pano state: element 1 of the constants buffer (aliased members)
+			auto pc = consts.read(1u);
+				    reconDir = util::eval_point_origin_direction(sampleClipXY,
+				        pc.gFrustumRight.xyz(), pc.gFrustumUp.xyz(), pc.gFrustumForward.xyz(),
+				        bakedProjection, pc.gCameraDelta.x, pc.gCameraDelta.y);
+				}
+				Float3 sampleWorldPos = sampleViewZ * reconDir;
 
 				Float planeDist = luisa::compute::abs(
 					luisa::compute::dot(sampleWorldPos - centerWorldPos, centerNormal));
@@ -684,9 +739,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 
 				// Diffuse path
 				$if(wDiffuse > 1e-4f) {
-					Float4 sampleDiff = make_float4(
-						diffTile.read(sIdx * 4u + 0u), diffTile.read(sIdx * 4u + 1u),
-						diffTile.read(sIdx * 4u + 2u), diffTile.read(sIdx * 4u + 3u));
+					Float4 sampleDiff = diffTile.read(sIdx);
 					Float sampleLum = luminance(sampleDiff.xyz());
 					Float lumW = luisa::compute::abs(centerLum - sampleLum) * phiInv;
 					lumW = luisa::compute::min(lumW, c.gDiffMaxLuminanceRelativeDifference);
@@ -727,9 +780,7 @@ void RelaxDenoiser::compileAtrousSmem(Device& device) {
 				};
 
 				$if(wSpecPreLum > 1e-4f) {
-					Float4 sampleSpec = make_float4(
-						specTile.read(sIdx * 4u + 0u), specTile.read(sIdx * 4u + 1u),
-						specTile.read(sIdx * 4u + 2u), specTile.read(sIdx * 4u + 3u));
+					Float4 sampleSpec = specTile.read(sIdx);
 					Float sampleSpecLum = luminance(sampleSpec.xyz());
 					Float specLumW = luisa::compute::abs(centerSpecLum - sampleSpecLum) * specPhiInv;
 					specLumW = luisa::compute::min(specLumW, c.gSpecMaxLuminanceRelativeDifference);

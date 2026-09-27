@@ -13,6 +13,7 @@
 #include "newtype/util/Profiler.h"
 #include <luisa/dsl/syntax.h>
 #include "cinder/Log.h"
+#include "cinder/CinderAssert.h"
 #include <algorithm>
 
 namespace newtype::scene {
@@ -43,7 +44,12 @@ ShapeId Geometry::add_shape(luisa::unique_ptr<MeshShape> shape, luisa::unique_pt
                              float shadow_terminator,
                              float intersection_offset) noexcept {
     if (!transform) transform = StaticTransform::create();
-    return _add_shape_impl(std::move(shape), transform.get(), std::move(transform),
+    // Capture the raw pointer BEFORE the move: parameter initializers are
+    // indeterminately sequenced and MSVC evaluates them right-to-left, so an
+    // inline "transform.get(), std::move(transform)" pair hands the callee a
+    // null raw pointer once `owned` has been move-initialized first.
+    const Transform *raw = transform.get();
+    return _add_shape_impl(std::move(shape), raw, std::move(transform),
                            shadow_terminator, intersection_offset);
 }
 
@@ -55,7 +61,6 @@ ShapeId Geometry::_add_shape_impl(luisa::unique_ptr<MeshShape> shape, const Tran
 
     // Capture before `owned` is moved into the instance data below.
     const bool has_owned_transform = owned != nullptr;
-
     // Allocate ShapeId (reuse free slot or append)
     ShapeId shape_id;
     if (!_free_slots.empty()) {
@@ -65,10 +70,8 @@ ShapeId Geometry::_add_shape_impl(luisa::unique_ptr<MeshShape> shape, const Tran
         shape_id = static_cast<ShapeId>(_slots.size());
         _slots.emplace_back();
     }
-
     // Dense TLAS index
     uint tlas_index = static_cast<uint>(_instances.size());
-
     // Set transform on the shape
     shape->set_transform(transform->matrix());
 
@@ -99,18 +102,31 @@ ShapeId Geometry::_add_shape_impl(luisa::unique_ptr<MeshShape> shape, const Tran
     _instances.push_back(std::move(data));
 
     // Update slot map
-    _slots[shape_id] = { tlas_index, true };
+    _slots[shape_id] = { tlas_index, true, false };
     _tlas_to_shape.push_back(shape_id);
 
     // Track instanced transforms if dynamic. Owned transforms are registered
     // unconditionally — the pipeline guarantees their lifetime, so polling a
-    // (currently) static one is safe and later mutation propagates.
+    // (currently) static one is safe and later mutation propagates. For
+    // borrowed transforms, is_static() is chain-aware: a static transform
+    // under an animated parent is registered so parent motion re-flushes it.
     if (has_owned_transform || !transform->is_static()) {
-        _transform_tree.push(transform);
-        auto [node, is_static] = _transform_tree.leaf(transform);
-        _transform_tree.pop(transform);
-        _instanced_transforms.emplace_back(node, tlas_index);
+        _instanced_transforms.emplace_back(transform, tlas_index);
     }
+
+    // Also poll the shape-internal transform (getShape(id)->set_transform or
+    // get_transform(id)->set_*() on it): the GPU state lives in Geometry, not
+    // in the shape, so its dirty flag is propagated like the registered
+    // transforms above. Regular add_shape instances always own their shape.
+    _shape_transform_instances.push_back(tlas_index);
+
+    // Per-frame deformable poll (update() step 1): deformable meshes always
+    // own their shape, and deformable() is fixed at construction — register
+    // once here (pre- and post-build adds take this same path). Read the
+    // LIVE instance: `data` is moved-from above and owning adds leave its
+    // shape_ref null.
+    if (_instances[tlas_index].get_shape()->deformable())
+        _deformable_instances.push_back(tlas_index);
 
     // Update triangle count
     _triangle_count += tri_count;
@@ -132,13 +148,15 @@ ShapeId Geometry::_add_shape_impl(luisa::unique_ptr<MeshShape> shape, const Tran
         _rebuild_bindless_array();
         _bindless_update_needed = true;
 
-        // Add to TLAS (CPU-side registration; build deferred to update())
+        // Add to TLAS (CPU-side registration; build deferred to update()).
+        // Pass the recorded visibility so a set_visibility() between add and
+        // the deferred rebuild is not lost.
         const compute::Mesh *mesh = inst.get_shape()->mesh_resource();
         if (mesh) {
-            _tlas.emplace_back(*mesh, inst._transform);
+            _tlas.emplace_back(*mesh, inst._transform, inst.visible ? 0xFFu : 0x00u);
         } else {
             CI_LOG_W("Geometry::add_shape post-build: ShapeId=" << shape_id
-                << " has null mesh_resource() — TLAS entry skipped, instance "
+                << " has null mesh_resource() - TLAS entry skipped, instance "
                 << "will not be visible in ray traversal.");
         }
 
@@ -147,10 +165,11 @@ ShapeId Geometry::_add_shape_impl(luisa::unique_ptr<MeshShape> shape, const Tran
         _instance_transforms_dirty = true;
         _dirty_transform_indices.clear();
         _tlas_needs_rebuild = true;
+        _invalidate_gpu_transform_rows("post-build add_shape");
 
-        CI_LOG_I("Post-build add: ShapeId=" << shape_id
+        CI_LOG_D("Post-build add: ShapeId=" << shape_id
             << ", tlas_index=" << tlas_index
-            << ", total_instances=" << _instances.size());
+            << ", total_instances=" << static_cast<uint>(_instances.size()));
     }
 
     return shape_id;
@@ -325,6 +344,23 @@ void Geometry::build(Stream &stream) noexcept {
         }
     }
 
+    // VRAM accounting (A2 gate): distinct GPU vertex buffers (prototypes +
+    // owning instances share nothing; prototype instances share the
+    // prototype's buffer). Reported per layout for the before/after gate.
+    {
+        size_t vertex_bytes = 0u, triangle_bytes = 0u;
+        auto accumulate = [&](const MeshShape *s) noexcept {
+            vertex_bytes += s->vertex_buffer().size() * sizeof(MeshShape::GpuVertex);
+            triangle_bytes += s->triangle_buffer().size() * sizeof(Triangle);
+        };
+        for (auto &proto : _prototypes) accumulate(proto.shape.get());
+        for (auto &inst : _instances)
+            if (inst.owns_shape()) accumulate(inst.get_shape());
+        CI_LOG_I("Geometry::build: GPU vertex buffers " << (vertex_bytes >> 10u)
+            << " KB (" << sizeof(MeshShape::GpuVertex) << " B/vertex, layout "
+            << NT_VERTEX_LAYOUT << "), triangles " << (triangle_bytes >> 10u) << " KB");
+    }
+
     // Create vertex bindless array and register all buffers
     // Prototypes get their own slots; prototype instances share them
     _rebuild_bindless_array();
@@ -350,13 +386,17 @@ void Geometry::build(Stream &stream) noexcept {
     stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
     _transform_prev_stale = false;
 
-    // Build TLAS with all mesh instances (regular + prototype instances)
+    // Build TLAS with all mesh instances (regular + prototype instances).
+    // The recorded instance visibility is applied here — set_visibility()
+    // calls made before build() rely on this (e.g. VATMesh hides all
+    // topologies except the first at registration time).
     for (const auto &inst : _instances) {
         MeshShape *shape = inst.get_shape();
         const compute::Mesh *mesh_to_use = shape->mesh_resource();
 
         if (mesh_to_use) {
-            _tlas.emplace_back(*mesh_to_use, inst._transform);
+            _tlas.emplace_back(*mesh_to_use, inst._transform,
+                               inst.visible ? 0xFFu : 0x00u);
         }
     }
 
@@ -364,6 +404,14 @@ void Geometry::build(Stream &stream) noexcept {
     _is_light_instance.resize(_instances.size(), false);
     for (uint i = 0u; i < _instances.size(); ++i)
         _is_light_instance[i] = (_instances[i].properties & PROPERTY_HAS_LIGHT) != 0;
+
+    // Re-derive the deformable poll list from ground truth (one O(N) pass;
+    // add_shape maintains it incrementally, this self-heals any future add
+    // path that forgets to register).
+    _deformable_instances.clear();
+    for (uint i = 0u; i < _instances.size(); ++i)
+        if (_instances[i].get_shape()->deformable())
+            _deformable_instances.push_back(i);
 
     stream << _tlas.build();
 
@@ -373,7 +421,7 @@ void Geometry::build(Stream &stream) noexcept {
         uint proc_tlas_index = static_cast<uint>(_instances.size());
         _tlas.emplace_back(_procGeom->blas());
         stream << _tlas.build();
-        CI_LOG_I("ProceduralGeometry BLAS registered as TLAS instance " << proc_tlas_index
+        CI_LOG_D("ProceduralGeometry BLAS registered as TLAS instance " << proc_tlas_index
             << " (" << _procGeom->instance_count() << " AABBs)");
     }
 #endif
@@ -400,27 +448,31 @@ bool Geometry::update(Stream &stream, bool requireTLASRefit, float time) noexcep
         needs_update = true;
     }
 
-    // Flush pending bindless array update (from post-build additions/removals)
+    // Flush pending bindless array update (from post-build additions/removals).
+    // Stream-ordered on its own; render-stream consumers are ordered by the
+    // requireSync -> _geomUpdateEvent timeline signal, so no CPU stall here.
     if (_bindless_update_needed) {
-        stream << _vertex_bindless.update() << compute::synchronize();
+        stream << _vertex_bindless.update();
         requireSync = true;
         _bindless_update_needed = false;
     }
 
-    // 1. Deformable meshes (skip prototype instances — they share the prototype's BLAS)
-    for (auto &inst : _instances) {
-        if (inst.owns_shape() && inst.get_shape()->deformable()) {
-            auto *deformable = static_cast<DeformableMesh*>(inst.get_shape());
-            if (deformable->update(stream)) {
-                uint tlas_idx = _slots[inst.instance_id].tlas_index;
-                _tlas.set_mesh(tlas_idx, *deformable->mesh_resource());
-                // Update bindless array to point to the new frame's vertex buffer
-                _vertex_bindless.emplace_on_update(
-                    deformable->vertex_bindless_slot(),
-                    deformable->vertex_buffer());
-                _bindless_update_needed = true;
-                needs_update = true;
-            }
+    // 1. Deformable meshes, polled through the registered indices only
+    // (add_shape registers; prototype instances share a static BLAS and can
+    // never be deformable). A full _instances sweep here is O(N) per frame
+    // even when nothing is deformable — ~20 ms/frame at 1.6M prototype
+    // instances in a Debug build.
+    for (uint tlas_idx : _deformable_instances) {
+        auto *deformable = static_cast<DeformableMesh *>(
+            _instances[tlas_idx].get_shape());
+        if (deformable->update(stream)) {
+            _tlas.set_mesh(tlas_idx, *deformable->mesh_resource());
+            // Update bindless array to point to the new frame's vertex buffer
+            _vertex_bindless.emplace_on_update(
+                deformable->vertex_bindless_slot(),
+                deformable->vertex_buffer());
+            _bindless_update_needed = true;
+            needs_update = true;
         }
     }
 
@@ -430,70 +482,56 @@ bool Geometry::update(Stream &stream, bool requireTLASRefit, float time) noexcep
         _bindless_update_needed = false;
     }
 
-    // 2. Animated transforms
+    // 2. Animated transforms. A parent mutation propagates the dirty flag
+    // down to all descendants, so checking each registered leaf is enough.
+    // Registered external transforms are applied first and mirror their
+    // matrix into the shape's internal transform WITHOUT re-dirtying it, so
+    // the shape-internal poll below only fires on direct user sets.
     bool transforms_dirty = false;
     for (auto &inst_transform : _instanced_transforms) {
         if (inst_transform.is_dirty()) {
-            float4x4 new_matrix = inst_transform.matrix();
             uint tlas_idx = static_cast<uint>(inst_transform.get_instance_id());
-            _instances[tlas_idx]._transform = new_matrix;
-            // Size guard: post-build additions leave _instance_transform_cpu
-            // undersized until upload_dirty_transforms() resizes it.
-            if (tlas_idx < _instance_transform_cpu.size()) {
-                _instance_transform_cpu[tlas_idx] = new_matrix;
-                _dirty_transform_indices.push_back(tlas_idx);
-            }
-            //if (_instances[tlas_idx].owns_shape())
-                _instances[tlas_idx].get_shape()->set_transform(new_matrix);
-            _tlas.set_transform_on_update(inst_transform.get_instance_id(), new_matrix);
+            const float4x4 new_matrix = inst_transform.matrix();
+            _apply_instance_transform(tlas_idx, new_matrix,
+                                      inst_transform.transform->change());
+            // Keep the shape's CPU-side transform() view in sync. Owning
+            // instances only: prototype instances share the prototype's
+            // transform, which no single instance may clobber.
+            if (_instances[tlas_idx].owns_shape())
+                _instances[tlas_idx].get_shape()->store_transform(new_matrix);
 
-            // Track light transform changes for LightSampler re-upload (O(1))
-            if (tlas_idx < _is_light_instance.size() && _is_light_instance[tlas_idx]) {
-                _lightTransformDirty = true;
-                auto ch = inst_transform.node->transform()->change();
-                if (ch == Change::Scale) _lightScaleDirty = true;
-            }
-
-            const_cast<Transform*>(inst_transform.node->transform())->clear_dirty();
+            // Self-only clear: ancestors keep their own flags so their
+            // registered instances are still processed this frame; the
+            // sweep below clears the chains afterwards.
+            const_cast<Transform*>(inst_transform.transform)->clear_dirty();
             needs_update = true;
             transforms_dirty = true;
         }
     }
+    // Clear ancestor dirty state (group-only transforms without shapes of
+    // their own are never polled directly and would stay dirty forever).
+    for (auto &inst_transform : _instanced_transforms) {
+        const_cast<Transform*>(inst_transform.transform)->clear_dirty_chain();
+    }
 
-    // 2a. Shape-internal transform updates (getShape(id)->set_transform(m) or
-    // getShapeTransform(id)->set_*() on the shape's internal transform). The
-    // GPU state (TLAS matrix, instance transform buffers) lives here, not in
-    // the shape, so the shape's dirty flag must be polled and propagated like
-    // the animated path above. The animated loop re-marks the shape-internal
-    // transform via set_transform() after propagating, and Geometry::set_transform
-    // marks it after its immediate propagation — the matrix comparison makes
-    // those no-ops, and clear_dirty() keeps the flag from staying set forever.
-    // Prototype instances are skipped: shape_ref is shared with the prototype
-    // and all sibling instances, so the internal transform is not authoritative.
-    for (uint tlas_idx = 0u; tlas_idx < _instances.size(); ++tlas_idx) {
+    // 2a. Shape-internal transform updates (getShape(id)->set_transform(m)
+    // or getShapeTransform(id)->set_*() on the shape's internal transform).
+    // Polled over the registered owning instances only — no full instance
+    // scan; prototype instances share the prototype's transform, which is
+    // not authoritative per instance. The matrix comparison absorbs
+    // redundant marks (e.g. the add-time seed writing the same matrix).
+    for (uint tlas_idx : _shape_transform_instances) {
         auto &inst = _instances[tlas_idx];
-        if (!inst.owns_shape()) continue;
         Transform *shape_transform = inst.get_shape()->transform();
         if (!shape_transform->is_dirty()) continue;
-        float4x4 new_matrix = shape_transform->matrix();
+        const float4x4 new_matrix = shape_transform->matrix();
         bool changed = any(new_matrix.cols[0] != inst._transform.cols[0]) ||
                        any(new_matrix.cols[1] != inst._transform.cols[1]) ||
                        any(new_matrix.cols[2] != inst._transform.cols[2]) ||
                        any(new_matrix.cols[3] != inst._transform.cols[3]);
         if (changed) {
-            inst._transform = new_matrix;
-            if (tlas_idx < _instance_transform_cpu.size()) {
-                _instance_transform_cpu[tlas_idx] = new_matrix;
-                _dirty_transform_indices.push_back(tlas_idx);
-            }
-            _tlas.set_transform_on_update(tlas_idx, new_matrix);
-
-            // Track light transform changes for LightSampler re-upload (O(1))
-            if (tlas_idx < _is_light_instance.size() && _is_light_instance[tlas_idx]) {
-                _lightTransformDirty = true;
-                if (shape_transform->change() == Change::Scale)
-                    _lightScaleDirty = true;
-            }
+            _apply_instance_transform(tlas_idx, new_matrix,
+                                      shape_transform->change());
             needs_update = true;
             transforms_dirty = true;
         }
@@ -515,6 +553,34 @@ bool Geometry::update(Stream &stream, bool requireTLASRefit, float time) noexcep
         _recompute_has_visible_glass();
         _has_visible_glass_dirty = false;
         _has_active_subsurface_dirty = false;
+    }
+
+    // 3b. GPU-owned transform rows: a device writer (e.g. the TetCage solve)
+    // rewrote the registered rows of _instance_transform_buffer this frame.
+    // Hand the TLAS build a device-side copy source so the matrices reach the
+    // instance descriptors without a host round-trip (LC fork API; the copy
+    // kernel writes only the transform rows p0-p2 and runs after the set
+    // kernel, so CPU modifications to other rows compose). Deferred while a
+    // topology rebuild or a transform-buffer resize is pending: the source
+    // buffer would be replaced later inside this same Pipeline::update
+    // (upload_dirty_transforms), and the rebuild repopulates rows anyway —
+    // the writer re-registers and the GPU path resumes next frame.
+    if (_gpuTransformsDirty) {
+        const bool buffersInSync = _instance_transform_buffer &&
+            _instance_transform_cpu.size() == _instances.size() &&
+            _instance_transform_buffer.size() == _instances.size();
+        if (_gpuTransformRanges.empty()) {
+            // Registration lost (topology) and not re-established — drop the
+            // flag so we don't force refits forever.
+            _gpuTransformsDirty = false;
+        } else if (!_tlas_needs_rebuild && buffersInSync) {
+            const auto [first, count] = _gpuTransformRanges.front();
+            _tlas.set_transform_buffer_on_update(
+                first, _instance_transform_buffer.view(first, count));
+            _gpuTransformsDirty = false;
+            needs_update = true;
+        }
+        // else: keep the flag and retry next frame (rebuild settles first)
     }
 
     // 4. Build TLAS
@@ -555,7 +621,7 @@ ShapeId Geometry::add_prototype(luisa::unique_ptr<MeshShape> prototype) noexcept
     _prototypes.push_back(std::move(pd));
 
     // Mark slot as alive (tlas_index stores prototype index, not TLAS index)
-    _slots[proto_id] = { proto_idx, true };
+    _slots[proto_id] = { proto_idx, true, true };
 
     // If the scene is already built, the prototype's BLAS must be built on the
     // next update() pass and the bindless array must be extended to cover the
@@ -566,7 +632,7 @@ ShapeId Geometry::add_prototype(luisa::unique_ptr<MeshShape> prototype) noexcept
     if (_built) {
         if (!_prototypes.back().shape->mesh_resource()) {
             CI_LOG_W("Geometry::add_prototype post-build: ShapeId=" << proto_id
-                << " has null mesh_resource() — instances referencing this "
+                << " has null mesh_resource() - instances referencing this "
                 "prototype will not traverse correctly.");
         }
         _pending_blas_build = true;
@@ -577,7 +643,7 @@ ShapeId Geometry::add_prototype(luisa::unique_ptr<MeshShape> prototype) noexcept
         _instance_props_dirty = true;
     }
 
-    CI_LOG_I("Prototype registered: ShapeId=" << proto_id
+    CI_LOG_D("Prototype registered: ShapeId=" << proto_id
         << ", proto_idx=" << proto_idx
         << ", triangles=" << _prototypes.back().shape->triangle_count()
         << ", total_prototypes=" << _prototypes.size()
@@ -586,7 +652,28 @@ ShapeId Geometry::add_prototype(luisa::unique_ptr<MeshShape> prototype) noexcept
     return proto_id;
 }
 
-ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform) noexcept {
+ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform,
+                               uint32_t material_layers) noexcept {
+    return _add_instance_impl(prototype_id, transform, nullptr, nullptr, material_layers);
+}
+
+ShapeId Geometry::add_instance(ShapeId prototype_id, const Transform *transform,
+                               uint32_t material_layers) noexcept {
+    if (transform == nullptr) return kInvalidShapeId;
+    return _add_instance_impl(prototype_id, transform->matrix(), transform, nullptr, material_layers);
+}
+
+ShapeId Geometry::add_instance(ShapeId prototype_id, luisa::unique_ptr<Transform> transform,
+                               uint32_t material_layers) noexcept {
+    if (!transform) return kInvalidShapeId;
+    return _add_instance_impl(prototype_id, transform->matrix(), nullptr, std::move(transform),
+                              material_layers);
+}
+
+ShapeId Geometry::_add_instance_impl(ShapeId prototype_id, const float4x4 &initial_world,
+                                     const Transform *borrowed,
+                                     luisa::unique_ptr<Transform> owned,
+                                     uint32_t material_layers) noexcept {
     if (prototype_id >= _slots.size() || !_slots[prototype_id].alive)
         return kInvalidShapeId;
 
@@ -612,7 +699,6 @@ ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform) 
         instance_id = static_cast<ShapeId>(_slots.size());
         _slots.emplace_back();
     }
-
     // Dense TLAS index
     uint tlas_index = static_cast<uint>(_instances.size());
 
@@ -624,10 +710,27 @@ ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform) 
     data.properties         = proto_shape->properties();
     data.shadow_terminator  = 0.0f;
     data.intersection_offset= 0.0f;
-    data._transform         = transform;
-    data._material_layers   = proto_shape->material_layers();
+    data._transform         = initial_world;
+    // Per-instance material layers (B1): an explicit value becomes this
+    // instance's own layer pack; the sentinel inherits the prototype's.
+    if (material_layers == kInheritMaterialLayers) {
+        data._material_layers = proto_shape->material_layers();
+    } else {
+        if (!_built)
+            CI_LOG_W("Geometry::add_instance: per-instance material layers set "
+                "before build() - out-of-range layer indices won't be validated "
+                "until shade (proto ShapeId=" << prototype_id << ").");
+        _validate_material_layers(material_layers, "add_instance");
+        data._material_layers = material_layers;
+    }
     data._bindless_vert     = _prototypes[proto_idx].vertex_bindless_slot;
     data._bindless_tri      = _prototypes[proto_idx].triangle_bindless_slot;
+
+    // Retained transform (polled route). Borrowed transforms are stored so
+    // get_transform() can hand them back; owned ones force registration.
+    data._borrowed_transform = borrowed;
+    data._owned_transform    = std::move(owned);
+    const Transform *xform  = data._owned_transform ? data._owned_transform.get() : borrowed;
 
     // Track light shapes
     if (data.properties & PROPERTY_HAS_LIGHT) {
@@ -643,17 +746,23 @@ ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform) 
     _instances.push_back(std::move(data));
 
     // Update slot map
-    _slots[instance_id] = { tlas_index, true };
+    _slots[instance_id] = { tlas_index, true, false };
     _tlas_to_shape.push_back(instance_id);
+
+    // Register for per-frame polling (same rule as add_shape; is_static()
+    // is chain-aware so a static transform under an animated parent polls).
+    if (xform != nullptr && (data._owned_transform || !xform->is_static())) {
+        _instanced_transforms.emplace_back(xform, tlas_index);
+    }
 
     // Add to TLAS — only for post-build additions (pre-build handled by build())
     if (_built) {
         const compute::Mesh *mesh = proto_shape->mesh_resource();
         if (mesh) {
-            _tlas.emplace_back(*mesh, transform);
+            _tlas.emplace_back(*mesh, initial_world, data.visible ? 0xFFu : 0x00u);
         } else {
             CI_LOG_W("Geometry::add_instance post-build: prototype has null "
-                "mesh_resource() — TLAS entry skipped, instance will not be "
+                "mesh_resource() - TLAS entry skipped, instance will not be "
                 "visible in ray traversal (proto ShapeId=" << prototype_id
                 << ", inst ShapeId=" << instance_id << ").");
         }
@@ -662,6 +771,7 @@ ShapeId Geometry::add_instance(ShapeId prototype_id, const float4x4 &transform) 
         _instance_transforms_dirty = true;
         _dirty_transform_indices.clear();
         _tlas_needs_rebuild = true;
+        _invalidate_gpu_transform_rows("post-build add_instance");
     }
 
     return instance_id;
@@ -672,6 +782,34 @@ void Geometry::add_instances(ShapeId prototype_id,
                              luisa::vector<ShapeId> &out_ids) noexcept {
     out_ids.reserve(out_ids.size() + transforms.size());
     for (auto &xform : transforms) {
+        auto id = add_instance(prototype_id, xform);
+        out_ids.push_back(id);
+    }
+}
+
+void Geometry::add_instances(ShapeId prototype_id,
+                             luisa::span<const float4x4> transforms,
+                             luisa::span<const uint32_t> material_layers,
+                             luisa::vector<ShapeId> &out_ids) noexcept {
+    if (!material_layers.empty() && material_layers.size() != transforms.size()) {
+        CI_LOG_E("Geometry::add_instances: material_layers size "
+            << material_layers.size() << " != transforms size "
+            << transforms.size() << " - batch ignored");
+        return;
+    }
+    out_ids.reserve(out_ids.size() + transforms.size());
+    for (uint i = 0u; i < transforms.size(); ++i) {
+        auto id = add_instance(prototype_id, transforms[i],
+            material_layers.empty() ? kInheritMaterialLayers : material_layers[i]);
+        out_ids.push_back(id);
+    }
+}
+
+void Geometry::add_instances(ShapeId prototype_id,
+                             luisa::span<const Transform *const> transforms,
+                             luisa::vector<ShapeId> &out_ids) noexcept {
+    out_ids.reserve(out_ids.size() + transforms.size());
+    for (auto *xform : transforms) {
         auto id = add_instance(prototype_id, xform);
         out_ids.push_back(id);
     }
@@ -689,42 +827,57 @@ MeshShape *Geometry::get_prototype(ShapeId prototype_id) const noexcept {
 // Runtime Manipulation
 //==============================================================================
 
-void Geometry::set_transform(ShapeId id, const float4x4 &matrix,
-                             Change changeHint) noexcept {
+void Geometry::_apply_instance_transform(uint tlas_idx, const float4x4 &matrix,
+                                         Change change) noexcept {
+    auto &inst = _instances[tlas_idx];
+    inst._transform = matrix;
+    // Size guard: post-build additions leave _instance_transform_cpu
+    // undersized until upload_dirty_transforms() resizes it.
+    if (tlas_idx < _instance_transform_cpu.size()) {
+        _instance_transform_cpu[tlas_idx] = matrix;
+        _dirty_transform_indices.push_back(tlas_idx);
+    }
+    _tlas.set_transform_on_update(tlas_idx, matrix);
+
+    // Track light transform changes for LightSampler re-upload (O(1))
+    if (tlas_idx < _is_light_instance.size() && _is_light_instance[tlas_idx]) {
+        _lightTransformDirty = true;
+        if (change == Change::Scale)
+            _lightScaleDirty = true;
+    }
+}
+
+void Geometry::set_instance_transform(ShapeId id, const float4x4 &matrix,
+                                      Change changeHint) noexcept {
     if (!is_valid(id)) return;
     if (!_built) {
-        CI_LOG_W("Geometry::set_transform called before build() — transform "
+        CI_LOG_W("Geometry::set_instance_transform called before build() - transform "
             "will be applied when build() runs, but TLAS ops are queued on "
             "an unbuilt accel (ShapeId=" << id << ").");
     }
     uint tlas_idx = _slots[id].tlas_index;
     auto &inst = _instances[tlas_idx];
 
-    inst._transform = matrix;
-    if (tlas_idx < _instance_transform_cpu.size()) {
-        _instance_transform_cpu[tlas_idx] = matrix;
-        _dirty_transform_indices.push_back(tlas_idx);
+    if (_row_is_gpu_owned(tlas_idx)) {
+        CI_LOG_W("Geometry::set_instance_transform on GPU-owned row " << tlas_idx
+            << " dropped - a device kernel owns the matrix; re-register or "
+               "use the CPU path (ShapeId=" << id << ")");
+        return;
     }
+
+    _apply_instance_transform(tlas_idx, matrix, changeHint);
     _instance_transforms_dirty = true;
-    if (inst.owns_shape()) inst.get_shape()->set_transform(matrix);
-
-    _tlas.set_transform_on_update(tlas_idx, matrix);
+    if (inst.owns_shape()) inst.get_shape()->store_transform(matrix);
     _transform_dirty = true;
-
-    // Track light transform changes for LightSampler re-upload (O(1))
-    if (tlas_idx < _is_light_instance.size() && _is_light_instance[tlas_idx]) {
-        _lightTransformDirty = true;
-        if (changeHint == Change::Scale)
-            _lightScaleDirty = true;
-    }
 }
 
 void Geometry::set_visibility(ShapeId id, bool visible) noexcept {
     if (!is_valid(id)) return;
     if (!_built) {
-        CI_LOG_W("Geometry::set_visibility called before build() — visibility "
-            "state is recorded but TLAS set_visibility_on_update is queued on "
-            "an unbuilt accel (ShapeId=" << id << ").");
+        // Recorded on the instance; build() applies it to the TLAS mask when
+        // the accel is constructed.
+        CI_LOG_D("Geometry::set_visibility called before build() - recorded, "
+            "applied at TLAS build (ShapeId=" << id << ").");
     }
     uint tlas_idx = _slots[id].tlas_index;
     if (_instances[tlas_idx].visible == visible) return;
@@ -743,10 +896,44 @@ void Geometry::set_visibility(ShapeId id, bool visible) noexcept {
     _has_active_subsurface_dirty = true;
 }
 
+void Geometry::set_camera_visibility(ShapeId id, bool camera_visible) noexcept {
+    if (!is_valid(id)) return;
+    uint tlas_idx = _slots[id].tlas_index;
+    auto &inst = _instances[tlas_idx];
+    bool invisible = !camera_visible;
+    bool currently_invisible = (inst.properties & PROPERTY_INVISIBLE_TO_CAMERA) != 0u;
+    if (currently_invisible == invisible) return;
+
+    inst.properties = invisible
+        ? (inst.properties | PROPERTY_INVISIBLE_TO_CAMERA)
+        : (inst.properties & ~PROPERTY_INVISIBLE_TO_CAMERA);
+    if (auto *shape = inst.get_shape()) {
+        shape->set_property_flag(PROPERTY_INVISIBLE_TO_CAMERA, invisible);
+    }
+
+    if (tlas_idx < _instance_buffer_cpu.size())
+        _instance_buffer_cpu[tlas_idx].x = inst.properties;
+
+    // Camera-path skip is read from the instance props buffer (.x) by the
+    // G-buffer / mirror / glass-tint shaders. No TLAS mask or LightSampler
+    // change: the shape keeps its visibility and light sampling power.
+    _instance_props_dirty = true;
+}
+
+bool Geometry::is_camera_visible(ShapeId id) const noexcept {
+    return is_valid(id) &&
+        (_instances[_slots[id].tlas_index].properties & PROPERTY_INVISIBLE_TO_CAMERA) == 0u;
+}
+
 void Geometry::set_material_layers(ShapeId id, uint32_t layers) noexcept {
     if (!is_valid(id)) return;
+    if (_slots[id].prototype) {
+        CI_LOG_W("Geometry::set_material_layers: ShapeId " << id
+            << " names a prototype (no TLAS instance of its own) - ignored");
+        return;
+    }
     if (!_built) {
-        CI_LOG_W("Geometry::set_material_layers called before build() — value "
+        CI_LOG_W("Geometry::set_material_layers called before build() - value "
             "is recorded on the instance; build() will pick it up, but any "
             "out-of-range layer indices won't be validated until shade "
             "(ShapeId=" << id << ").");
@@ -756,19 +943,7 @@ void Geometry::set_material_layers(ShapeId id, uint32_t layers) noexcept {
     if (inst._material_layers == layers) return;
 
     // B9: validate layer indices against material pool if available
-    if (_material_pool) {
-        for (int layer = 0; layer < 4; ++layer) {
-            uint mat_idx = (layers >> (layer * 8)) & 0xFFu;
-            if (mat_idx == 0xFFu) continue;  // sentinel: layer unused
-            if (mat_idx >= _material_pool->count()) {
-                CI_LOG_W("Geometry::set_material_layers: layer " << layer
-                    << " references material index " << mat_idx
-                    << " which is out of range (pool size "
-                    << _material_pool->count() << ") — shade will read garbage "
-                    "data (ShapeId=" << id << ").");
-            }
-        }
-    }
+    _validate_material_layers(layers, "set_material_layers");
 
     inst._material_layers = layers;
     if (inst.owns_shape()) inst.get_shape()->set_material_layers(layers);
@@ -777,13 +952,61 @@ void Geometry::set_material_layers(ShapeId id, uint32_t layers) noexcept {
     _instance_props_dirty = true;
     _has_visible_glass_dirty = true;
     _has_active_subsurface_dirty = true;
+    // Emission is baked per instance into the LightSampler's triangle
+    // records — a layers change on any instance requires the table rebuild.
+    // Conservative (any layers change dirties lights): rebuild cost is
+    // edit-time only, never per-frame.
+    _lights_dirty = true;
+}
+
+uint32_t Geometry::material_layers(ShapeId id) const noexcept {
+    if (!is_valid(id) || _slots[id].prototype) return 0u;
+    return _instances[_slots[id].tlas_index]._material_layers;
+}
+
+bool Geometry::set_instance_user_param(ShapeId id, uint slot, luisa::float4 value) noexcept {
+    if (slot >= 4u) {
+        CI_LOG_W("Geometry::set_instance_user_param: slot " << slot
+            << " out of range (0..3) - ignored (ShapeId=" << id << ")");
+        return false;
+    }
+    if (!is_valid(id) || _slots[id].prototype) {
+        CI_LOG_W("Geometry::set_instance_user_param: ShapeId " << id
+            << " is not a TLAS instance (invalid or prototype) - ignored");
+        return false;
+    }
+    uint tlas_idx = _slots[id].tlas_index;
+    _instances[tlas_idx]._user_params[slot] = value;
+    _instance_params_dirty = true;
+    return true;
+}
+
+luisa::float4 Geometry::instance_user_param(ShapeId id, uint slot) const noexcept {
+    if (!is_valid(id) || _slots[id].prototype || slot >= 4u)
+        return luisa::float4(0.0f);
+    return _instances[_slots[id].tlas_index]._user_params[slot];
+}
+
+void Geometry::_validate_material_layers(uint32_t layers, const char *ctx) const noexcept {
+    if (!_material_pool) return;
+    for (int layer = 0; layer < 4; ++layer) {
+        uint mat_idx = (layers >> (layer * 8)) & 0xFFu;
+        if (mat_idx == 0xFFu) continue;  // sentinel: layer unused
+        if (mat_idx >= _material_pool->count()) {
+            CI_LOG_W("Geometry::" << ctx << ": layer " << layer
+                << " references material index " << mat_idx
+                << " which is out of range (pool size "
+                << _material_pool->count() << ") - shade will read garbage "
+                "data.");
+        }
+    }
 }
 
 bool Geometry::remove_shape(ShapeId id) noexcept {
     if (!is_valid(id)) return false;
 
     if (!_built) {
-        CI_LOG_W("Geometry::remove_shape called before build() — TLAS has no "
+        CI_LOG_W("Geometry::remove_shape called before build() - TLAS has no "
             "entries yet; _tlas.pop_back() will be called on an empty accel "
             "(ShapeId=" << id << ").");
     }
@@ -803,6 +1026,14 @@ bool Geometry::remove_shape(ShapeId id) noexcept {
                 return it.get_instance_id() == tlas_idx;
             }),
         _instanced_transforms.end());
+    _shape_transform_instances.erase(
+        std::remove(_shape_transform_instances.begin(),
+                    _shape_transform_instances.end(), tlas_idx),
+        _shape_transform_instances.end());
+    _deformable_instances.erase(
+        std::remove(_deformable_instances.begin(),
+                    _deformable_instances.end(), tlas_idx),
+        _deformable_instances.end());
 
     // Remove from light indices if it was a light
     if (_instances[tlas_idx].properties & PROPERTY_HAS_LIGHT) {
@@ -841,6 +1072,18 @@ bool Geometry::remove_shape(ShapeId id) noexcept {
                 break;
             }
         }
+        for (auto &idx : _shape_transform_instances) {
+            if (idx == last_idx) {
+                idx = tlas_idx;
+                break;
+            }
+        }
+        for (auto &idx : _deformable_instances) {
+            if (idx == last_idx) {
+                idx = tlas_idx;
+                break;
+            }
+        }
 
         // Update light_instance_indices: moved light last_idx → tlas_idx
         for (auto &li : _light_instance_indices) {
@@ -868,8 +1111,95 @@ bool Geometry::remove_shape(ShapeId id) noexcept {
     _instance_transforms_dirty = true;
     _dirty_transform_indices.clear();
     _tlas_needs_rebuild = true;
+    _invalidate_gpu_transform_rows("remove_shape swap-and-pop");
 
-    CI_LOG_I("Removed ShapeId=" << id << ", remaining_instances=" << _instances.size());
+#ifndef NDEBUG
+    // Registry invariants after the swap-and-pop fixups: in-range, unique,
+    // each entry actually deformable. A missed remap would silently freeze
+    // the wrong instance's per-frame deform poll (TransformTreeTest's churn
+    // knob drives this path; remove is rare so the O(k²) check is free).
+    for (size_t i = 0; i < _deformable_instances.size(); ++i) {
+        const uint di = _deformable_instances[i];
+        CI_ASSERT_MSG(di < _instances.size(),
+            "remove_shape: deformable registry index out of range");
+        CI_ASSERT_MSG(_instances[di].get_shape()->deformable(),
+            "remove_shape: deformable registry points at a non-deformable "
+            "instance (missed swap-and-pop remap)");
+        for (size_t j = i + 1; j < _deformable_instances.size(); ++j)
+            CI_ASSERT_MSG(di != _deformable_instances[j],
+                "remove_shape: duplicate deformable registry index");
+    }
+#endif
+
+    CI_LOG_D("Removed ShapeId=" << id << ", remaining_instances=" << static_cast<uint>(_instances.size()));
+    return true;
+}
+
+//==============================================================================
+// GPU-owned transform rows (device-side TLAS transform source)
+//==============================================================================
+
+bool Geometry::_row_is_gpu_owned(uint tlas_idx) const noexcept {
+    for (const auto &[first, count] : _gpuTransformRanges)
+        if (tlas_idx >= first && tlas_idx < first + count)
+            return true;
+    return false;
+}
+
+void Geometry::_invalidate_gpu_transform_rows(const char *why) noexcept {
+    if (!_gpuTransformRanges.empty()) {
+        CI_LOG_W("Geometry: GPU transform rows invalidated (" << why
+            << ") - dense rows reshuffled; the device writer must re-resolve "
+               "and re-register before its next write");
+        _gpuTransformRanges.clear();
+    }
+    ++_topologyGeneration;
+}
+
+uint Geometry::tlas_index_of(ShapeId id) const noexcept {
+    if (id >= _slots.size() || !_slots[id].alive || _slots[id].prototype)
+        return ~0u;
+    uint row = _slots[id].tlas_index;
+    return row < _instances.size() ? row : ~0u;
+}
+
+bool Geometry::register_gpu_transform_rows(luisa::span<const ShapeId> ids) noexcept {
+    _gpuTransformRanges.clear();
+    if (ids.empty()) {
+        CI_LOG_W("Geometry::register_gpu_transform_rows: empty id list");
+        return false;
+    }
+    luisa::vector<uint> rows;
+    rows.reserve(ids.size());
+    for (ShapeId id : ids) {
+        uint row = tlas_index_of(id);
+        if (row == ~0u) {
+            CI_LOG_W("Geometry::register_gpu_transform_rows: ShapeId " << id
+                << " does not resolve to a TLAS row (prototype or dead slot)");
+            return false;
+        }
+        rows.push_back(row);
+    }
+    std::sort(rows.begin(), rows.end());
+    const auto uniqueEnd = std::unique(rows.begin(), rows.end());
+    if (uniqueEnd != rows.end()) {
+        CI_LOG_W("Geometry::register_gpu_transform_rows: duplicate ids - rejected");
+        return false;
+    }
+    for (size_t i = 1; i < rows.size(); ++i) {
+        if (rows[i] != rows.front() + i) {
+            CI_LOG_W("Geometry::register_gpu_transform_rows: rows ["
+                << rows.front() << ".." << rows.back()
+                << "] are not one contiguous run - the v1 device-copy API "
+                   "takes a single {first, count} range; rejected");
+            return false;
+        }
+    }
+    _gpuTransformRanges.emplace_back(rows.front(),
+                                     static_cast<uint>(rows.size()));
+    CI_LOG_I("Geometry: " << rows.size() << " TLAS rows ["
+        << rows.front() << ", " << rows.front() + rows.size()
+        << ") now GPU-owned (device writer holds curr+prev)");
     return true;
 }
 
@@ -885,8 +1215,12 @@ MeshShape* Geometry::get_shape(ShapeId id) noexcept {
 Transform* Geometry::get_transform(ShapeId id) noexcept {
     if (!is_valid(id)) return nullptr;
     auto &inst = _instances[_slots[id].tlas_index];
-    return inst._owned_transform ? inst._owned_transform.get()
-                                 : inst.get_shape()->transform();
+    if (inst._owned_transform) return inst._owned_transform.get();
+    if (inst._borrowed_transform) return const_cast<Transform*>(inst._borrowed_transform);
+    // Matrix-only prototype instances share the prototype's internal
+    // transform with all siblings — not authoritative, report none.
+    if (!inst.owns_shape()) return nullptr;
+    return inst.get_shape()->transform();
 }
 
 DeformableMesh* Geometry::get_deformable(ShapeId id) noexcept {
@@ -899,6 +1233,61 @@ bool Geometry::is_valid(ShapeId id) const noexcept {
     return id < _slots.size() && _slots[id].alive;
 }
 
+void Geometry::unload_static_cpu_data() noexcept {
+    if (!_built) {
+        CI_LOG_W("Geometry::unload_static_cpu_data called before build() - ignored");
+        return;
+    }
+    const auto layers_emissive = [&](uint32_t layers) noexcept {
+        if (!_material_pool) return false;
+        for (int layer = 0; layer < 4; ++layer) {
+            uint mat_idx = (layers >> (layer * 8)) & 0xFFu;
+            if (mat_idx == 0xFFu) continue;
+            const auto &em = _material_pool->getMaterial(mat_idx).data.emission;
+            if (dot(em, make_float3(0.2126f, 0.7152f, 0.0722f)) > 0.001f) return true;
+        }
+        return false;
+    };
+
+    size_t freed = 0u, count = 0u;
+
+    // Owning shapes: unload when non-deformable, non-light, non-emissive.
+    for (const auto &inst : _instances) {
+        if (!inst.owns_shape()) continue;
+        MeshShape *shape = inst.shape.get();
+        if (!shape->built() || shape->deformable() || !shape->has_cpu_data()) continue;
+        if (shape->properties() & PROPERTY_HAS_LIGHT) continue;
+        if (layers_emissive(inst._material_layers)) continue;
+        freed += shape->vertices().size() * sizeof(MeshShape::Vertex) +
+                 shape->triangles().size() * sizeof(Triangle);
+        shape->unloadCPUData();
+        ++count;
+    }
+
+    // Prototypes: the CPU data serves LightSampler areas for EVERY instance
+    // (per-instance layers included), so unload only when no instance —
+    // including per-instance emissive overrides — needs it.
+    luisa::vector<bool> keep(_prototypes.size(), false);
+    for (const auto &inst : _instances) {
+        if (inst.owns_shape() || !layers_emissive(inst._material_layers)) continue;
+        for (uint p = 0u; p < _prototypes.size(); ++p)
+            if (_prototypes[p].shape.get() == inst.shape_ref) { keep[p] = true; break; }
+    }
+    for (uint p = 0u; p < _prototypes.size(); ++p) {
+        MeshShape *shape = _prototypes[p].shape.get();
+        if (keep[p] || !shape->built() || shape->deformable() ||
+            !shape->has_cpu_data() || (shape->properties() & PROPERTY_HAS_LIGHT))
+            continue;
+        freed += shape->vertices().size() * sizeof(MeshShape::Vertex) +
+                 shape->triangles().size() * sizeof(Triangle);
+        shape->unloadCPUData();
+        ++count;
+    }
+
+    CI_LOG_I("Geometry::unload_static_cpu_data: released ~" << (freed >> 10u)
+        << " KB of CPU mesh data across " << count << " meshes");
+}
+
 bool Geometry::is_visible(ShapeId id) const noexcept {
     if (!is_valid(id)) return false;
     return _instances[_slots[id].tlas_index].visible;
@@ -908,12 +1297,34 @@ void Geometry::upload_instance_props(Stream &stream) noexcept {
     if (_instance_props_structure_changed) {
         _update_instance_props_buffer();
         _instance_props_structure_changed = false;
+        // Dense rows reshuffled (swap-and-pop / append): user-params rows
+        // follow the same ordering once the pool-side buffer exists. Before
+        // the first authoring the buffer never materialized, so scenes that
+        // don't use per-instance data stay at zero cost.
+        if (_material_pool && _material_pool->instanceParamsResident())
+            _instance_params_dirty = true;
     }
     // Ensure buffer exists and is correct size
     if (!_instance_buffer || _instance_buffer.size() != _instance_buffer_cpu.size())
         _instance_buffer = _device.create_buffer<luisa::uint4>(_instance_buffer_cpu.size());
     stream << _instance_buffer.copy_from(_instance_buffer_cpu.data());
     _instance_props_dirty = false;
+}
+
+void Geometry::upload_instance_params(
+    newtype::render::MaterialPool &pool, Stream &stream) noexcept {
+    if (!_instance_params_dirty || _instances.empty()) {
+        _instance_params_dirty = false;
+        return;
+    }
+    // Serialize the dense TLAS-ordered rows (4 float4 per instance).
+    luisa::vector<luisa::float4> rows;
+    rows.reserve(_instances.size() * 4u);
+    for (const auto &inst : _instances)
+        for (uint slot = 0u; slot < 4u; slot++)
+            rows.push_back(inst._user_params[slot]);
+    pool.uploadInstanceParams(stream, rows);
+    _instance_params_dirty = false;
 }
 
 void Geometry::upload_dirty_transforms(Stream &stream) noexcept {
@@ -924,9 +1335,12 @@ void Geometry::upload_dirty_transforms(Stream &stream) noexcept {
         // would upload nothing while the buffers hold stale/undersized data).
         // Resize the CPU mirror (full repopulate — swap-and-pop on removal
         // reshuffles dense indices) and recreate the GPU buffers with a full
-        // upload, mirroring build().
+        // upload, mirroring build(). GPU-owned rows cannot be active here:
+        // every path that desynchronizes the sizes bumps the topology
+        // generation, which clears the registration.
         if (_instance_transform_cpu.size() != _instances.size()) {
             _dirty_transform_indices.clear();
+            _last_dirty_transform_indices.clear();
             _instance_transforms_dirty = false;
             _transform_prev_stale = false;
             if (_instances.empty()) return;
@@ -942,30 +1356,73 @@ void Geometry::upload_dirty_transforms(Stream &stream) noexcept {
             stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
             return;
         }
-        // Snapshot the GPU current buffer into prev BEFORE the dirty uploads:
-        // at this point it still holds last frame's transforms. Static instances
-        // get prev == curr (zero object motion) automatically. This full-buffer
-        // device copy is 64B per instance.
-        if (_instance_transform_prev_buffer &&
-            _instance_transform_prev_buffer.size() == _instance_transform_buffer.size()) {
-            stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
+        // Snapshot prev BEFORE the dirty uploads: at this point curr still
+        // holds last frame's transforms. Only indices whose curr is about to
+        // change — this frame's AND last frame's movers (the latter get their
+        // stop-frame prev fix here; the full-buffer copy that used to run
+        // every moving frame repaired them as a side effect) — need the
+        // refresh; static instances already have prev == curr. 64B device
+        // copy per index, no host staging.
+        const bool prevValid = _instance_transform_prev_buffer &&
+            _instance_transform_prev_buffer.size() == _instance_transform_buffer.size();
+        const size_t n = _instance_transform_cpu.size();
+        // With GPU-owned rows active, never whole-buffer-upload curr or
+        // whole-buffer-copy prev — that would clobber rows a device kernel
+        // wrote this frame (TetCage solve owns both curr and prev there).
+        // Per-index uploads naturally skip them (dirty rows are never
+        // GPU-owned; owned rows in _last_dirty are stale handoff stragglers
+        // filtered below).
+        const bool hasGpuRows = has_gpu_transform_rows();
+        const bool many = !hasGpuRows && _dirty_transform_indices.size() * 4u >= n;
+        const bool lastMany = !hasGpuRows && _last_dirty_transform_indices.size() * 4u >= n;
+        if (prevValid) {
+            if (many || lastMany) {
+                stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
+            } else {
+                for (uint idx : _last_dirty_transform_indices)
+                    if (!_row_is_gpu_owned(idx))
+                        stream << _instance_transform_prev_buffer.view(idx, 1u).copy_from(
+                            _instance_transform_buffer.view(idx, 1u));
+                for (uint idx : _dirty_transform_indices)
+                    if (!_row_is_gpu_owned(idx))
+                        stream << _instance_transform_prev_buffer.view(idx, 1u).copy_from(
+                            _instance_transform_buffer.view(idx, 1u));
+            }
         }
-        for (uint idx : _dirty_transform_indices) {
-            stream << _instance_transform_buffer.view(idx, 1u).copy_from(
-                &_instance_transform_cpu[idx]);
+        if (many) {
+            // Single full-buffer host upload — _instance_transform_cpu is
+            // maintained by set_transform/animated-update paths.
+            stream << _instance_transform_buffer.copy_from(_instance_transform_cpu.data());
+        } else {
+            for (uint idx : _dirty_transform_indices) {
+                stream << _instance_transform_buffer.view(idx, 1u).copy_from(
+                    &_instance_transform_cpu[idx]);
+            }
         }
+        _last_dirty_transform_indices = _dirty_transform_indices;
         _dirty_transform_indices.clear();
         _instance_transforms_dirty = false;
         // curr advanced this frame; once motion stops, prev needs one re-sync.
         _transform_prev_stale = true;
     } else if (_transform_prev_stale) {
         // Motion stopped: bring prev back in line with curr so object motion
-        // returns to zero instead of persisting as phantom flow.
+        // returns to zero instead of persisting as phantom flow. Per-index
+        // over the stopped movers when GPU rows are active (their prev is
+        // maintained by the device writer; a full copy would freeze its
+        // motion for a frame).
         if (_instance_transform_prev_buffer &&
             _instance_transform_prev_buffer.size() == _instance_transform_buffer.size()) {
-            stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
+            if (has_gpu_transform_rows()) {
+                for (uint idx : _last_dirty_transform_indices)
+                    if (!_row_is_gpu_owned(idx))
+                        stream << _instance_transform_prev_buffer.view(idx, 1u).copy_from(
+                            _instance_transform_buffer.view(idx, 1u));
+            } else {
+                stream << _instance_transform_buffer.copy_to(_instance_transform_prev_buffer);
+            }
         }
         _transform_prev_stale = false;
+        _last_dirty_transform_indices.clear();
     }
 }
 

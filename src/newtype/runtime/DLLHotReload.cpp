@@ -60,7 +60,7 @@ DLLHotReload::DLLHotReload(
     if (std::filesystem::exists(_dllPath)) 
         _lastDllModTime = getLastWriteTime(_dllPath);
     
-    CI_LOG_I("DLLHotReload: Initialized for '" << _shaderName
+    CI_LOG_D("DLLHotReload: Initialized for '" << _shaderName
              << "' (DLL: " << _dllPath << ", Source: " << _sourcePath << ")");
 }
 
@@ -149,7 +149,7 @@ void DLLHotReload::unload() {
     FreeLibrary(_module);
     _module = nullptr;
 
-    CI_LOG_I("DLLHotReload: Unloaded '" << _shaderName << "'");
+    CI_LOG_D("DLLHotReload: Unloaded '" << _shaderName << "'");
 }
 
 bool DLLHotReload::checkForChanges() {
@@ -173,7 +173,7 @@ bool DLLHotReload::checkForChanges() {
     if (it != _sourceModTimes.end() && currentTime > it->second) {
         it->second = currentTime;
         _pendingReload.store(true, std::memory_order_release);
-        CI_LOG_I("DLLHotReload: Detected change in source file: " << _shaderName);
+        CI_LOG_D("DLLHotReload: Detected change in source file: " << _shaderName);
         return true;
     }
     return false;
@@ -204,7 +204,7 @@ bool DLLHotReload::performReload(luisa::compute::Device& device, luisa::compute:
 
     // Step 1: Unload the DLL FIRST
     if (_module != nullptr) {
-        CI_LOG_I("DLLHotReload: Unloading old DLL to allow rebuild...");
+        CI_LOG_D("DLLHotReload: Unloading old DLL to allow rebuild...");
 
         // Destroy old shader
         if (_destroyFunc != nullptr && _shaderPtr != nullptr) {
@@ -225,17 +225,21 @@ bool DLLHotReload::performReload(luisa::compute::Device& device, luisa::compute:
 
     // Step 2: Build the new DLL (now the file is not locked)
     if (_autoRebuild) {
-        CI_LOG_I("DLLHotReload: Building new DLL...");
+        CI_LOG_D("DLLHotReload: Building new DLL...");
 
-        // Backup old DLL before build so we can restore on failure
+        // Backup old DLL before build so we can restore on failure. COPY, not
+        // rename: the original stays in place, keeping the linker's
+        // incremental state valid — renaming forced a full link (full PDB
+        // rewrite) every reload, which collides with locked/corrupt PDBs.
         auto backupPath = _dllPath + ".bak";
         bool hadBackup = false;
         if (std::filesystem::exists(_dllPath)) {
             std::error_code ec;
-            std::filesystem::rename(_dllPath, backupPath, ec);
+            std::filesystem::copy_file(_dllPath, backupPath,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
             if (!ec) {
                 hadBackup = true;
-                CI_LOG_I("DLLHotReload: Backed up DLL to " << backupPath);
+                CI_LOG_D("DLLHotReload: Backed up DLL to " << backupPath);
             } else {
                 CI_LOG_W("DLLHotReload: Failed to backup old DLL: " << ec.message());
             }
@@ -246,7 +250,8 @@ bool DLLHotReload::performReload(luisa::compute::Device& device, luisa::compute:
             // Restore backup so we can reload the old version
             if (hadBackup && std::filesystem::exists(backupPath)) {
                 std::error_code ec;
-                std::filesystem::rename(backupPath, _dllPath, ec);
+                std::filesystem::copy_file(backupPath, _dllPath,
+                                           std::filesystem::copy_options::overwrite_existing, ec);
                 if (ec) CI_LOG_W("DLLHotReload: Failed to restore backup: " << ec.message());
             }
             load(device);
@@ -264,7 +269,7 @@ bool DLLHotReload::performReload(luisa::compute::Device& device, luisa::compute:
     }
 
     // Step 3: Load the new DLL
-    CI_LOG_I("DLLHotReload: Loading new DLL...");
+    CI_LOG_D("DLLHotReload: Loading new DLL...");
 
     if (!std::filesystem::exists(_dllPath)) {
         //logError("New DLL not found after build: " << _dllPath.c_str());
@@ -324,7 +329,7 @@ bool DLLHotReload::performReload(luisa::compute::Device& device, luisa::compute:
 }
 
 bool DLLHotReload::buildDLL() {
-    CI_LOG_I("DLLHotReload: Building shader DLL...");
+    CI_LOG_D("DLLHotReload: Building shader DLL...");
 
     // Find MSBuild
     std::string msbuildPath = findMSBuild();
@@ -335,8 +340,8 @@ bool DLLHotReload::buildDLL() {
 
     // Log paths for debugging
     //CI_LOG_I("DLLHotReload: Project path: " << _projectPath);
-    CI_LOG_I("DLLHotReload: DLL path: " << _dllPath);
-    CI_LOG_I("DLLHotReload: Source path: " << _sourcePath);
+    CI_LOG_D("DLLHotReload: DLL path: " << _dllPath);
+    CI_LOG_D("DLLHotReload: Source path: " << _sourcePath);
     //CI_LOG_I("DLLHotReload: Current directory: " << std::filesystem::current_path().string());
 
     // The project path should already be absolute from constructor
@@ -346,14 +351,14 @@ bool DLLHotReload::buildDLL() {
         logError("Project file not found: " + projectPath.string());
         return false;
     }
-    CI_LOG_I("DLLHotReload: Project path: " << projectPath.string());
+    CI_LOG_D("DLLHotReload: Project path: " << projectPath.string());
 
     // Find the solution directory (vc2022 folder)
-    // projectPath is at: D:/Projects/NewTypeEngine/runtime_shaders/PathTracerShader/PathTracerShader.vcxproj
+    // projectPath is at: <repo>/runtime_shaders/SimpleTestShader/SimpleTestShader.vcxproj
     // We need to go up 3 levels: vcxproj → shader folder → runtime_shaders → (project root) → vc2022
     auto solutionDir = projectPath.parent_path().parent_path().parent_path() / "vc2022";
     solutionDir = std::filesystem::weakly_canonical(solutionDir);
-    CI_LOG_I("DLLHotReload: Solution directory: " << solutionDir.string());
+    CI_LOG_D("DLLHotReload: Solution directory: " << solutionDir.string());
 
     // Discover the .sln file dynamically (works across projects)
     std::filesystem::path slnPath;
@@ -370,11 +375,15 @@ bool DLLHotReload::buildDLL() {
     
 
     // Build command line - build the SOLUTION file, not the project file
-    // This ensures $(SolutionDir) and output directories resolve correctly
+    // This ensures $(SolutionDir) and output directories resolve correctly.
+    // INCREMENTAL build (no :Rebuild): the reload flow has already unloaded the
+    // DLL by this point, so MSBuild can overwrite it; the source file just
+    // changed, so the up-to-date check recompiles the single TU and relinks.
+    // A full :Rebuild paid ~9-10s per hot reload for a one-file project.
     std::ostringstream cmdLine;
     cmdLine << "\"" << msbuildPath << "\""
              << " \"" << slnPath.string() << "\""
-             << " /t:" << getProjectTargetName() << ":Rebuild"
+             << " /t:" << getProjectTargetName()
              << " /p:Configuration=Debug_Runtime"
              << " /p:Platform=x64"
              << " /v:minimal"
@@ -486,7 +495,7 @@ bool DLLHotReload::buildDLL() {
         return false;
     }
 
-    CI_LOG_I("DLLHotReload: Build completed in " << elapsed << "ms");
+    CI_LOG_D("DLLHotReload: Build completed in " << elapsed << "ms");
     /*if (!output.empty()) {
         CI_LOG_D("MSBuild output:\n" << output);
     }*/
@@ -497,9 +506,9 @@ bool DLLHotReload::buildDLL() {
         // List all DLLs in the output directory
         auto outputDir = std::filesystem::path(_dllPath).parent_path();
         if (std::filesystem::exists(outputDir)) {
-            CI_LOG_I("DLLHotReload: Listing files in output directory: " << outputDir.string());
+            CI_LOG_D("DLLHotReload: Listing files in output directory: " << outputDir.string());
             for (const auto& entry : std::filesystem::directory_iterator(outputDir)) {
-                CI_LOG_I("  - " << entry.path().filename().string()
+                CI_LOG_D("  - " << entry.path().filename().string()
                          << " (time: " << std::chrono::duration_cast<std::chrono::milliseconds>(
                                 entry.last_write_time().time_since_epoch()).count() << "ms)");
             }

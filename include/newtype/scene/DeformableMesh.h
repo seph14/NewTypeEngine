@@ -66,7 +66,7 @@ public:
 private:
     // Double buffering for zero-stall updates (separate from base MeshShape buffers)
     struct DeformableFrame {
-        Buffer<Vertex> vertex_buffer;
+        Buffer<GpuVertex> vertex_buffer;
         luisa::unique_ptr<Mesh> blas;
     };
 
@@ -92,16 +92,16 @@ public:
     [[nodiscard]] bool deformable() const noexcept override { return true; }
 
     /// Override: returns the current frame's animated vertex buffer (not the static original)
-    [[nodiscard]] const Buffer<Vertex>& vertex_buffer() const noexcept override {
+    [[nodiscard]] const Buffer<GpuVertex>& vertex_buffer() const noexcept override {
         return _frames[_current_frame].vertex_buffer;
     }
 
     /// Get the vertex buffers for GPU update
-    [[nodiscard]] const Buffer<Vertex>& curr_vertex_buffer() const noexcept {
+    [[nodiscard]] const Buffer<GpuVertex>& curr_vertex_buffer() const noexcept {
         return _frames[_current_frame].vertex_buffer;
     }
 
-    [[nodiscard]] const Buffer<Vertex>& next_vertex_buffer() const noexcept {
+    [[nodiscard]] const Buffer<GpuVertex>& next_vertex_buffer() const noexcept {
         return _frames[_require_double_buffer ? (1 - _current_frame) : _current_frame].vertex_buffer;
     }
 
@@ -167,7 +167,10 @@ private:
  */
 inline luisa::unique_ptr<DeformableMesh> make_deformable_mesh(
     Device &device, uint material_id = 0) noexcept {
-    return luisa::make_unique<DeformableMesh>(device, material_id);
+    // Explicit bool: the ctor's second parameter is requireDoubleBuffer —
+    // passing material_id positionally bound it to the bool (material stayed
+    // 0; caught by the TransformTreeTest churn material self-check).
+    return luisa::make_unique<DeformableMesh>(device, true, material_id);
 }
 
 } // namespace newtype::scene

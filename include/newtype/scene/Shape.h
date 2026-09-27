@@ -50,6 +50,13 @@ enum ShapeProperty : uint {
     PROPERTY_MAYBE_NON_OPAQUE    = 1u << 5u,  // Shape may have alpha testing
     PROPERTY_IS_DYNAMIC          = 1u << 6u,  // Shape transforms per-frame
     PROPERTY_DOUBLE_SIDED        = 1u << 8u,  // Use face normals, render both sides
+    // Illuminates without rendering: camera-path rays (G-buffer primary,
+    // mirror reflections, glass tint replay) pass through the shape, while
+    // light sampling / shadow / GI rays still hit it. Used for light shapes
+    // that should not appear as visible geometry.
+    // NOTE: bit 9 is the LAST free bit — the 10-bit property field of
+    // Shape::Handle is now full; further flags need a wider field.
+    PROPERTY_INVISIBLE_TO_CAMERA = 1u << 9u,
 };
 
 /**
@@ -80,6 +87,12 @@ public:
 
     /// Get property flags
     [[nodiscard]] uint properties() const noexcept { return _properties; }
+
+    /// Set/clear a property flag at runtime (e.g. PROPERTY_INVISIBLE_TO_CAMERA).
+    /// CPU-side mirror only; the GPU-visible instance buffer is owned by Geometry.
+    void set_property_flag(uint flag, bool value) noexcept {
+        _properties = value ? (_properties | flag) : (_properties & ~flag);
+    }
 
     /// Check specific properties
     [[nodiscard]] bool has_vertex_normal() const noexcept {

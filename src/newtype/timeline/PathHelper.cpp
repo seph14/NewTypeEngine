@@ -1,8 +1,8 @@
 #include "newtype/timeline/PathHelper.h"
 #include "cinder/app/App.h"
-#include "cinder/gl/gl.h"
 #if NT_ENABLE_TIMELINE_EDITOR
 #include "cinder/CinderImGui.h"
+#include "newtype/feature/Gizmo.h"
 #endif
 
 using namespace ci;
@@ -25,13 +25,6 @@ void PathHelper<D>::bakePoints() {
     if constexpr (D == 4) {
         for (auto& v : mBakedPos) v[3] = 1.f;
     }
-    mParticleVbo = gl::Vbo::create(GL_ARRAY_BUFFER, mBakedPos, GL_STREAM_DRAW);
-    geom::BufferLayout particleLayout;
-    particleLayout.append(geom::Attrib::POSITION, D, sizeof(vecP), 0);
-    auto mesh = gl::VboMesh::create(SAMPLE_POINTS, GL_POINTS,
-        {{particleLayout, mParticleVbo}});
-    mParticleBatch = gl::Batch::create(mesh,
-        gl::getStockShader(gl::ShaderDef().color()));
 }
 #endif
 
@@ -140,36 +133,42 @@ void PathHelper<D>::updateSelf() {
 
 template<int D>
 void PathHelper<D>::drawDebugPoints(float ratio, ci::Color controlPnt, ci::Color currPos) {
-    gl::ScopedModelMatrix scpModel;
-    gl::setModelMatrix(mat4());
-    gl::pointSize(16.f);
+    auto& gizmo = feature::Gizmo::get();
 
+    // Path curve: polyline through the baked spline samples — blue while a
+    // node is selected for editing, gray otherwise (state colors of the old
+    // GL_POINTS batch).
     {
-        gl::ScopedColor scpColor(
-            (mNodeIdx >= 0) ? Color(0.f, 0.f, 1.f) : Color::gray(.75f));
-        mParticleBatch->draw();
+        std::vector<luisa::float3> pts;
+        pts.reserve(mBakedPos.size());
+        for (const auto& p : mBakedPos) pts.emplace_back(p.x, p.y, p.z);
+        luisa::float3 lineCol = (mNodeIdx >= 0)
+            ? luisa::float3(0.f, 0.f, 1.f) : luisa::float3(0.75f);
+        gizmo.drawPolyline(pts, lineCol, 1.f, 2.f);
     }
 
+    // Control point handles: world spheres, radius parity with the old
+    // gl::drawSphere (0.125 scaled by the per-point size).
     {
-        gl::ScopedGlslProg scpGlsl(gl::getStockShader(gl::ShaderDef().color()));
-        if (mNodeIdx >= 0 && ratio >= 0.f && ratio <= 1.f) {
-            ratio = mCurve.getTime(glm::clamp(ratio, 0.f, 1.f) * mLength);
-            vecP pos = mCurve.getPosition(ratio);
-            gl::ScopedLineWidth scpLine(2.f);
-            gl::ScopedColor scpColor(currPos);
+        luisa::float3 ctlCol(controlPnt.r, controlPnt.g, controlPnt.b);
+        for (int i = 0; i < mCurve.getNumControlPoints(); i++) {
+            vecP p = mCurve.getControlPoint(i);
             float s = 1.f;
-            if constexpr (D > 3) s = pos[D - 1];
-            gl::drawStrokedCube(vec3(pos), s * vec3(2.6f));
+            if constexpr (D > 3) s = p[D - 1];
+            gizmo.drawSphere(luisa::float3(p.x, p.y, p.z), s * .125f, ctlCol);
         }
-        {
-            gl::ScopedColor scpColor(controlPnt);
-            for (int i = 0; i < mCurve.getNumControlPoints(); i++) {
-                vecP p = mCurve.getControlPoint(i);
-                float s = 1.f;
-                if constexpr (D > 3) s = p[D - 1];
-                gl::drawSphere(vec3(p), s * .125f);
-            }
-        }
+    }
+
+    // Current-position marker — only while a node is selected, ratio in range.
+    if (mNodeIdx >= 0 && ratio >= 0.f && ratio <= 1.f) {
+        ratio = mCurve.getTime(glm::clamp(ratio, 0.f, 1.f) * mLength);
+        vecP pos = mCurve.getPosition(ratio);
+        float s = 1.f;
+        if constexpr (D > 3) s = pos[D - 1];
+        luisa::float3 curCol(currPos.r, currPos.g, currPos.b);
+        // gl::drawStrokedCube took the full size (2.6·s) — half-size here.
+        gizmo.drawWireCube(luisa::float3(pos.x, pos.y, pos.z),
+                           luisa::float3(s * 1.3f), curCol, 1.f, 2.f);
     }
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <luisa/luisa-compute.h>
+#include "newtype/core/FeaturePoint.h"
 #include "newtype/core/FrameContext.h"
 
 namespace newtype {
@@ -25,9 +26,19 @@ struct FeatureContext {
     // Pipeline reference for temp image pool access
     Pipeline& pipeline;
 
+    // Injection point this context was built for. width()/height() report the
+    // dimensions matching the point's target: render dims for pipeline points,
+    // display dims for AfterToneMap (which runs on the presentation-size
+    // target when an upscaler is active).
+    FeaturePoint point = FeaturePoint::PreUpdate;
+
     // Convenience accessors
-    [[nodiscard]] uint width()       const noexcept { return frame.width; }
-    [[nodiscard]] uint height()      const noexcept { return frame.height; }
+    [[nodiscard]] uint width() const noexcept {
+        return point == FeaturePoint::AfterToneMap ? frame.displayWidth : frame.width;
+    }
+    [[nodiscard]] uint height() const noexcept {
+        return point == FeaturePoint::AfterToneMap ? frame.displayHeight : frame.height;
+    }
     [[nodiscard]] uint frameCount()  const noexcept { return frame.frameCount; }
 };
 

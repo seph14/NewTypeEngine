@@ -9,7 +9,7 @@ Pipeline constructor
   └─ Registers built-in IdentitySurfaceResolver × 14 (tags 0-13)
        │
 User code ─── p->surfaceResolver().create<CustomResolver>()
-       │     └─ Returns tag 14, 15, ...
+       │     └─ Returns tag CustomType, CustomType+1, ...
        │
 buildScene()
   └─ DLL loads (Debug_Runtime), registers more resolvers
@@ -85,7 +85,7 @@ void NewTypeApp::setup() {
     //    create() returns the next sequential tag.
     // ==================================================================
     uint checkerTag = mPipeline->surfaceResolver().create<CheckerboardResolver>();
-    // checkerTag == 14
+    // checkerTag == render::Material::CustomType (14 with the current built-ins)
 
     uint pulseTag = mPipeline->surfaceResolver().create<PulseResolver>();
     // pulseTag == 15
@@ -97,13 +97,13 @@ void NewTypeApp::setup() {
     // 3) Create materials using the returned tags
     // ==================================================================
     render::MaterialData checkerMat{};
-    checkerMat.type      = checkerTag;   // tag 14
+    checkerMat.type      = checkerTag;   // == Material::CustomType
     checkerMat.albedo    = luisa::make_float3(1.0f, 0.8f, 0.2f);
     checkerMat.roughness = 0.4f;
     uint checkerMatIdx   = mPipeline->addMaterial("checker", checkerMat);
 
     render::MaterialData pulseMat{};
-    pulseMat.type      = pulseTag;       // tag 15
+    pulseMat.type      = pulseTag;       // == Material::CustomType + 1
     pulseMat.albedo    = luisa::make_float3(0.5f);
     pulseMat.emission  = luisa::make_float3(0.0f);
     pulseMat.roughness = 0.3f;
@@ -127,17 +127,19 @@ void NewTypeApp::setup() {
 
 ## Runtime Mode (Debug_Runtime)
 
-The DLL auto-loads during `buildScene()`. Custom resolvers are registered via the DLL's `registerMaterialCallables` entry point. The host wraps each `SurfaceResolveFn` into a `CustomSurfaceResolver` automatically.
+The DLL auto-loads during `buildScene()`. Custom resolvers are registered via the DLL's `registerMaterialCallables` entry point (or `registerMaterialCallables2` — ABI v2, which also declares runtime tuning params; the loader prefers it and falls back to v1 when absent). The host wraps each `SurfaceResolveFn` into a `CustomSurfaceResolver` automatically.
 
 ```cpp
 // NewTypeEngine.cpp — same setup, but DLL handles registration
 void NewTypeApp::setup() {
     mPipeline = core::Pipeline::create(*renderer);
     // Built-ins 0-13 registered in constructor.
-    // DLL loaded during buildScene() below — registers customs at tags 14+.
+    // DLL loaded during buildScene() below — registers customs at
+    // tags >= render::Material::CustomType.
 
     render::MaterialData checkerMat{};
-    checkerMat.type    = 14u;  // first DLL-registered resolver
+    checkerMat.type    = render::Material::CustomType;  // first DLL-registered resolver
+    // (never hardcode 14u — the constant shifts when the engine adds a built-in type)
     checkerMat.albedo  = luisa::make_float3(1.0f, 0.5f, 0.2f);
     uint checkerMatIdx = mPipeline->addMaterial("checker", checkerMat);
 
@@ -192,6 +194,94 @@ CUSTOM_MATERIAL_API void registerMaterialCallables(
 }
 }
 ```
+
+## Runtime Tuning Params (ABI v2 — `registerMaterialCallables2`)
+
+With v1, every value tweak means editing the DLL source, a DLL rebuild, and a
+full shader recompile. ABI v2 adds a runtime params channel: the DLL declares
+named scalar sliders per callable, the engine hosts their current values in
+a small device buffer, and the resolver reads them at dispatch time via
+`resolver_params()`. Moving a slider is a 16-byte upload — **no DLL rebuild,
+no shader recompile** (values never enter the AST, so kernel hashes stay
+stable). Tune effects live from the `MaterialPool` "Resolver Params" UI, or
+drive headless validation runs with
+`--resolver-param <callable> <index> <value>`.
+
+Take the hologram resolver above and make its line density and tint
+tunable:
+
+```cpp
+// 1) Declare descriptors: name, min, max, default. Up to 32 scalars
+//    per callable; scalars pack 4 per float4 in descriptor order
+//    (descriptor j -> block [j/4], component j%4).
+static const ResolverParamDesc kHologramParams[] = {
+    {"line_density", 10.0f, 200.0f, 100.0f},
+    {"scan_speed",    0.0f,   1.0f,   0.1f},
+    {"tint_r",        0.0f,   1.0f,   0.1f},
+    {"tint_g",        0.0f,   1.0f,   0.8f},
+    {"tint_b",        0.0f,   1.0f,   0.9f},
+};
+
+// 2) Sentinel for "no params available" (v1 host, or params-buffer
+//    overflow): keep hard-coded defaults equal to the def_v's so both
+//    paths render the same picture.
+static constexpr std::uint32_t kNoParamBase = ~0u;
+
+// 3) The resolver becomes a factory capturing the params BASE by value:
+static SurfaceResolveFn make_hologram_resolver(std::uint32_t base) {
+    return [base](SurfaceData s, Var<MaterialData> mat, Float2 uv,
+                  Float2 screen_uv, Float3 wo, Float time,
+                  const BindlessVar& tex, UInt w, UInt h) -> SurfaceData {
+        Float density = 100.0f, speed = 0.1f;      // fallbacks
+        Float3 tint = make_float3(0.1f, 0.8f, 0.9f);
+        if (base != kNoParamBase) {
+            Float4 p0 = resolver_params(tex, base, 0u);  // block 0
+            Float4 p1 = resolver_params(tex, base, 1u);  // block 1
+            density = p0.x;  speed = p0.y;
+            tint = make_float3(p0.z, p0.w, p1.x);        // rgb across blocks
+        }
+
+        Float scan = sin(uv.y * density + time * speed) * 0.5f + 0.5f;
+        scan = pow(scan, 8.0f);
+        s.albedo = lerp(s.albedo, tint, scan * 0.6f);
+        s.emission = s.emission + tint * scan * 2.0f;
+        s.roughness = lerp(s.roughness, 0.05f, 0.5f);
+        return s;
+    };
+}
+
+// 4) Export the v2 entry point. paramFn FIRST — it allocates the
+//    callable's float4 base and returns it; then registerFn with the
+//    base captured in the closure. paramFn may be null (host without
+//    params support) — skip registration then, never crash.
+extern "C" {
+CUSTOM_MATERIAL_API void registerMaterialCallables2(
+    CallableRegisterFn registerFn, ParamRegisterFn paramFn, CallableClearFn clearFn) {
+
+    // ... existing v1-style callables unchanged ...
+
+    std::uint32_t holoBase = kNoParamBase;
+    if (paramFn) holoBase = paramFn("hologram", kHologramParams, 5u);
+    registerFn("hologram", make_hologram_resolver(holoBase));
+}
+}
+```
+
+Lifecycle notes:
+
+- Host capacity is 16 callables × 32 floats; `paramFn` returns `~0u` on
+  overflow — treat it as the no-params case.
+- Values survive DLL reloads keyed by callable **name**; keep descriptor
+  order stable across reloads so indices (and shader hashes) don't shift.
+- Editing a descriptor's `def_v` in the DLL source applies on the next
+  reload only if that slider was never moved; user-tuned values win.
+- A callable registered without `paramFn` keeps hard-coded behavior.
+
+Working example in the tree: `make_glass_blend_resolver` in
+`runtime_shaders/CustomMaterialShader/CustomMaterialShader.cpp` (the
+cornell blend sphere's `band_center` / `band_width` / `diffuse_rgb` move
+live). Full ABI details: docs/custom_material_callables.md and
+docs/resolver_params_abi_plan.md.
 
 ## SurfaceResolver API Reference
 
@@ -259,6 +349,11 @@ public:
 
 Built-in types use `IdentitySurfaceResolver` — no-op that passes `SurfaceData` through unchanged.
 
-### Custom Types (14–32)
+### Custom Types (Material::CustomType .. kMaxTypes-1)
 
-User-registered resolvers. Up to 19 custom types (14 through 32). Tags are assigned sequentially by `Polymorphic::create()`. The `$switch` dispatch in `resolve_surface()` generates one GPU `$case` per registered resolver at shader compile time.
+User-registered resolvers. Tags start at `render::Material::CustomType`
+(`kFirstCustomMaterialType` in Material.h, currently 14 — derived from the
+last built-in `MaterialType`, so it shifts automatically when the engine
+adds a built-in) and run through `kMaxTypes-1` (32). Tags are assigned
+sequentially by `Polymorphic::create()`. Always reference the constant
+instead of the literal when setting `MaterialData::type`. The `$switch` dispatch in `resolve_surface()` generates one GPU `$case` per registered resolver at shader compile time.

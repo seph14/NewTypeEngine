@@ -193,7 +193,7 @@ Image<float> TextureConverter::compressTexture(
     auto srcBytes = static_cast<uint64_t>(texelCount) *
                     (storage == PixelStorage::HALF4 ? 8u : 16u);
     auto dstBytes = static_cast<uint64_t>(totalUints) * 4u;
-    CI_LOG_I("Compressed " << size.x << "x" << size.y << " texture to "
+    CI_LOG_D("Compressed " << size.x << "x" << size.y << " texture to "
              << (isHdr ? "BC6H" : "BC7") << " (" << levels << " mips) in "
              << elapsed << " ms"
              << " (" << srcBytes << " -> " << dstBytes << " bytes, "
@@ -216,7 +216,7 @@ MaterialTextures MaterialTextureLoader::loadMaterial(
     const std::string& name,
     const TextureCompressionSettings& compression) {
 
-    CI_LOG_I("Loading material '" << name << "' from " << folderPath
+    CI_LOG_D("Loading material '" << name << "' from " << folderPath
              << (compression.enableCompression ? " (with BCn compression)" : ""));
 
     MaterialTextures textures;
@@ -245,11 +245,11 @@ MaterialTextures MaterialTextureLoader::loadMaterial(
 
     if (combinedRMA.valid() && combinedRMA.size().x >= 4u) {
         // Found combined RMA texture
-        CI_LOG_I("  Using combined RMA texture");
+        CI_LOG_D("  Using combined RMA texture");
         textures.rma = std::move(combinedRMA);
     } else {
         // No combined RMA found, load separate textures and pack them
-        CI_LOG_I("  No combined RMA found, packing separate textures");
+        CI_LOG_D("  No combined RMA found, packing separate textures");
         Image<float> roughness = tryLoadTexture(folderPath, name, {
             "_roughness", "_rough", "_r", "_Roughness", "_R"
         });
@@ -350,7 +350,7 @@ Image<float> MaterialTextureLoader::tryLoadTexture(
                 auto source = ci::app::loadAsset(assetPath);
                 if (source) {
                     CI_LOG_V("  Loading asset texture: " << assetPath);
-                    return TextureConverter::loadAsset(path, mDevice, true, srgbToLinear);
+                    return TextureConverter::loadAsset(path, mDevice, nullptr, true, srgbToLinear);
                 }
             } catch (...) {
                 // Continue
@@ -646,10 +646,14 @@ Image<float> TextureConverter::createTexture(
     }
 
     if (stream) {
-        // Use caller's stream — upload + bindless update happen on same stream
+        // Use caller's stream — lets the upload queue-order with the caller's
+        // subsequent work (bindless update, compression) without a sync.
         *stream << image.copy_from(pixels.data());
     } else {
-        // No stream provided — upload on local stream and synchronize
+        // No stream provided — upload on a temporary stream and synchronize
+        // before returning, so the returned image is fully resident. The temp
+        // stream is destroyed after the sync; textures must not be used by
+        // any stream before this returns (the sync guarantees it).
         auto localStream = device.create_stream(StreamTag::GRAPHICS);
         localStream << image.copy_from(pixels.data())
                     << synchronize();
@@ -759,30 +763,47 @@ Image<float> TextureConverter::createTexture(
 // TextureConverter - Asset Loading
 //==============================================================================
 
-Image<float> TextureConverter::loadAsset(
-    const std::filesystem::path& assetPath,
+namespace {
+
+// Shared format dispatch for loadAsset / loadFile / loadResource. Float formats
+// are already linear — srgbToLinear only affects 8-bit data.
+Image<float> loadFromSource(
+    const ci::DataSourceRef& source,
+    const std::string& ext,
     Device& device,
+    Stream* stream,
     bool generateMipmaps,
     bool srgbToLinear) {
 
-    CI_LOG_I("Loading texture asset: " << assetPath);
-
-    // Use Cinder's asset system
-    auto source = ci::app::loadAsset(assetPath.string());
-
-    // Detect format and load
-    auto ext = assetPath.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-    // HDR formats — float data is already linear, the flag does not apply
     if (ext == ".exr" || ext == ".hdr" || ext == ".hdri") {
         auto surface = ci::Surface32f(ci::loadImage(source));
-        return createTexture(surface, device, generateMipmaps);
+        return TextureConverter::createTexture(surface, device, generateMipmaps);
     }
 
-    // Standard formats (PNG, JPG, etc.)
     auto surface = ci::Surface8u(ci::loadImage(source));
-    return createTexture(surface, device, nullptr, srgbToLinear);
+    return TextureConverter::createTexture(surface, device, stream, srgbToLinear);
+}
+
+std::string lowerExtension(const std::filesystem::path& path) {
+    auto ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext;
+}
+
+} // namespace
+
+Image<float> TextureConverter::loadAsset(
+    const std::filesystem::path& assetPath,
+    Device& device,
+    Stream* stream,
+    bool generateMipmaps,
+    bool srgbToLinear) {
+
+    CI_LOG_D("Loading texture asset: " << assetPath);
+
+    auto source = ci::app::loadAsset(assetPath.string());
+    return loadFromSource(source, lowerExtension(assetPath), device, stream,
+                          generateMipmaps, srgbToLinear);
 }
 
 Image<float> TextureConverter::loadFile(
@@ -791,14 +812,28 @@ Image<float> TextureConverter::loadFile(
     Stream* stream,
     bool srgbToLinear) {
 
-    CI_LOG_I("Loading texture file: " << filePath);
+    CI_LOG_D("Loading texture file: " << filePath);
 
-    auto ext = filePath.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    auto source = ci::loadFile(filePath);
+    return loadFromSource(source, lowerExtension(filePath), device, stream,
+                          true, srgbToLinear);
+}
 
-    // Standard formats
-    auto surface = ci::Surface8u(ci::loadImage(filePath.string()));
-    return createTexture(surface, device, stream, srgbToLinear);
+Image<float> TextureConverter::loadResource(
+    const std::filesystem::path& resourcePath,
+    int mswID,
+    const std::string& mswType,
+    Device& device,
+    Stream* stream,
+    bool generateMipmaps,
+    bool srgbToLinear) {
+
+    CI_LOG_D("Loading texture resource: " << resourcePath
+              << " id:" << mswID << " type:" << mswType);
+
+    auto source = ci::app::loadResource(resourcePath, mswID, mswType);
+    return loadFromSource(source, lowerExtension(resourcePath), device, stream,
+                          generateMipmaps, srgbToLinear);
 }
 
 //==============================================================================

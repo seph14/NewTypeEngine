@@ -1,0 +1,10 @@
+[submodule "external/FidelityFX"]
+	path = external/FidelityFX
+	url = ../FidelityFX-dist
+[submodule "external/Valve/SteamAudio"]
+	path = external/Valve/SteamAudio
+	url = ../SteamAudio-dist
+
+[submodule "external/NVIDIA/DLSS"]
+	path = external/NVIDIA/DLSS
+	url = https://github.com/NVIDIA/DLSS.git

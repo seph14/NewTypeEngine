@@ -20,9 +20,11 @@ void DeformableMesh::build(Stream& stream) noexcept {
     if (_vertices.empty() || _triangles.empty())
         return;
 
-    // Create vertex buffer as reference, in case if we need the original mesh
-    _vertex_buffer = _device.create_buffer<Vertex>(_numVertices);
-    stream << _vertex_buffer.copy_from(_vertices.data());
+    // No rest-pose GPU buffer (A1): the base MeshShape _vertex_buffer copy
+    // was written once here and never read again — the frame buffers below
+    // carry the data (vertex_buffer() returns the current frame), and the
+    // original stays available CPU-side in _vertices. Saves one full vertex
+    // buffer per deformable.
 
     // Create triangle buffer
     _triangle_buffer = _device.create_buffer<Triangle>(_numTriangle);
@@ -31,8 +33,9 @@ void DeformableMesh::build(Stream& stream) noexcept {
     // Create double-buffered vertex buffers and BLAS instances
     int num = _require_double_buffer ? 2 : 1;
     for (int i = 0; i < num; ++i) {
-        _frames[i].vertex_buffer = _device.create_buffer<Vertex>(_numVertices);
-        stream << _frames[i].vertex_buffer.copy_from(_vertices.data());
+        _frames[i].vertex_buffer = _device.create_buffer<GpuVertex>(_numVertices);
+        util::upload_vertex_buffer(_frames[i].vertex_buffer,
+                                   std::span<const Vertex>{_vertices}, stream);
 
         // Create LuisaCompute Mesh (BLAS)
         auto mesh = _device.create_mesh(
@@ -52,8 +55,9 @@ const Mesh* DeformableMesh::_upload_and_rebuild(Stream &stream) noexcept {
     // Determine next frame index
     uint next_frame = _require_double_buffer ? (1 - _current_frame) : _current_frame;
 
-    // Copy CPU cache to GPU
-    stream << _frames[next_frame].vertex_buffer.copy_from(_vertices.data());
+    // Copy CPU cache to GPU (A2: packs through the active GPU layout)
+    util::upload_vertex_buffer(_frames[next_frame].vertex_buffer,
+                               std::span<const Vertex>{_vertices}, stream);
 
     // Rebuild BLAS
     stream << _frames[next_frame].blas->build();

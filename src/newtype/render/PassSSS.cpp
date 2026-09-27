@@ -73,7 +73,7 @@ void PassSSS::compile(luisa::compute::Device& device,
                       const SurfaceResolverPoly& resolver) {
     _geom = &geom;
 
-    using Vertex   = MeshShape::Vertex;
+    using Vertex   = MeshShape::GpuVertex;   // A2 active GPU layout
     using Triangle = luisa::compute::Triangle;
 
     _probeShader = device.compile<2>([&](
@@ -152,7 +152,7 @@ void PassSSS::compile(luisa::compute::Device& device,
             instance_xform,
             cast<Float>(frame_count),
             (make_float2(coord) + 0.5f) / make_float2(resolution),
-            resolution.x, resolution.y);
+                        resolution.x, resolution.y, inst_id);
 
         Float3 geo_ns   = surface.geo_ns;
         Float3 facing_ns = ite(dot(wo, geo_ns) < 0.0f, -geo_ns, geo_ns);

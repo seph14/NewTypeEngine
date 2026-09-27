@@ -77,9 +77,16 @@ public:
     // luisaDevice is required for Mode::HardwareNV12 (D3D11 device must be LUID-paired
     // with the D3D12 device for OpenSharedHandle1 to succeed in later phases).
     // Ignored for Mode::CpuRgb32.
+    // internalPrerollSec (HardwareNV12 only): when > 0, the decoder keeps a
+    // ring of internal RGBA8 slots sized to hold that much media time, so a
+    // consumer thread can decode ahead of the display clock and publish
+    // prepared frames later (startup pre-roll + hiccup slack). Slot count is
+    // capped at 8 and by a ~128 MB texture budget; query it via
+    // internal_slot_count().
     bool open(std::filesystem::path const& path,
               struct ID3D12Device* luisaDevice = nullptr,
-              Mode mode = Mode::CpuRgb32);
+              Mode mode = Mode::CpuRgb32,
+              double internalPrerollSec = 0.0);
 
     // Read the next decoded frame. Returns false on EOS or error.
     // After a successful call:
@@ -87,6 +94,21 @@ public:
     //   - HardwareNV12 mode: hw_nv12_texture() / hw_subresource_index() expose the decoder
     //                        texture (decoder-owned — do NOT release; copy if persistent)
     bool read_next_frame();
+
+    // Split of read_next_frame for threaded playback: decode_next_frame does
+    // ReadSample + NV12 extract + VP blt into the NEXT internal slot (safe
+    // while D3D12 reads the shared texture); then publish_frame_to_shared
+    // promotes the given slot into the D3D12-shared texture (keyed mutex +
+    // Flush + GPU-completion wait — must run when the D3D12 side is NOT
+    // sampling, e.g. right after the consumer's frame sync). Slots rotate
+    // round-robin; last_internal_slot() reports the one the latest decode
+    // filled. The consumer must keep at most internal_slot_count() - 1
+    // unpublished decodes in flight so a slot is never overwritten while its
+    // frame is still awaiting publish.
+    bool decode_next_frame();
+    bool publish_frame_to_shared(uint32_t internalSlot);
+    [[nodiscard]] uint32_t last_internal_slot()  const noexcept { return _lastInternalSlot; }
+    [[nodiscard]] uint32_t internal_slot_count() const noexcept { return _internalSlotCount; }
 
     // Seek to a presentation time (seconds). Keyframe-granular on some containers —
     // the next read_next_frame() may deliver a frame slightly BEFORE the target and
@@ -154,7 +176,7 @@ private:
     bool _configure_nv12_hw_output();
     bool _query_frame_metrics();
     bool _init_video_processor();         // Phase 3: NV12 → RGBA8 via VideoProcessorBlt
-    bool _convert_nv12_to_rgba8();        // Phase 3: per-frame blt; uses _hwTexture + _hwSubresourceIndex
+    bool _blt_nv12_to_internal();         // per-frame VP blt into the rotating internal slots
     bool _extract_hw_texture(struct IMFSample* sample);
     bool _copy_cpu_buffer(struct IMFSample* sample);
 
@@ -170,12 +192,18 @@ private:
     struct ID3D11VideoContext*                   _videoContext     = nullptr;
     struct ID3D11VideoProcessorEnumerator*       _videoEnum        = nullptr;
     struct ID3D11VideoProcessor*                 _videoProcessor   = nullptr;
-    struct ID3D11VideoProcessorOutputView*       _rgba8OutputView  = nullptr;
     struct ID3D11Texture2D*                      _rgba8Texture     = nullptr;
     // VP output is staged here first (no shared flags — VP rejects keyed-mutex
     // textures as output target with E_INVALIDARG on some drivers). Per frame
-    // we CopyResource from this to _rgba8Texture under the keyed mutex.
-    struct ID3D11Texture2D*                      _rgba8TextureInternal = nullptr;
+    // we CopyResource from the current slot to _rgba8Texture under the keyed
+    // mutex. Multiple slots let a decode thread run ahead of the display
+    // clock (see open()'s internalPrerollSec).
+    std::vector<struct ID3D11Texture2D*>              _internalTex;
+    std::vector<struct ID3D11VideoProcessorOutputView*> _internalView;
+    uint32_t _internalSlotCount = 1;
+    uint32_t _internalWrite     = 0;   // round-robin cursor, advanced after each blt
+    uint32_t _lastInternalSlot  = 0;   // slot filled by the latest decode_next_frame
+    double   _internalPrerollSec = 0.0;
     // Stable single-slice NV12 copy of the latest decoder frame. The decoder
     // texture is BIND_DECODER and multi-sliced; reading it directly from the
     // VP hangs the GPU on some drivers. Copying to a clean NV12 texture breaks

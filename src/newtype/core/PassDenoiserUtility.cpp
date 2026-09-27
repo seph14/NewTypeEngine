@@ -39,11 +39,13 @@ void RelaxDenoiser::compileUtility(Device& device) {
 			$return();
 		};
 
-		// Tile-based early out (sky)
+		// Tile-based early out (sky) — bare return, matching Atrous/AtrousSmem
+		// (perf R2 item 9). The former out_Diff pass-through was wasted
+		// bandwidth: every consumer of the slot rejects viewZ > range texels
+		// (atrous taps weight them 0, compose takes the envmap branch), and
+		// the atrous ping-pong leaves sky texels unwritten regardless.
 		UInt2 tilePos = pixelPos >> 4u;
-		//Float isSky = gIn_Tiles.read(tilePos).x;
 		$if(gIn_Tiles.read(tilePos).x != 0.0f) {
-			out_Diff.write(pixelPos, in_Diff.read(pixelPos));
 			$return();
 		};
 
@@ -133,6 +135,52 @@ void RelaxDenoiser::compileUtility(Device& device) {
 	//==========================================================================
 	// Utility shaders used by the denoiser internally
 	//==========================================================================
+	_relaxRawHitDistViz = device.compile<2>([](
+		ImageFloat out_frame,
+		ImageFloat spec_input) noexcept {
+		set_name("relax_raw_hitdist_viz");
+		UInt2 coord = dispatch_id().xy();
+		UInt2 res = dispatch_size().xy();
+		Float w = spec_input.read(coord).w;
+		Float v = luisa::compute::saturate(w * 0.1f);  // 0-10m -> black-white ramp
+		Float3 viz = make_float3(v);
+		// Build-epoch marker (see _relaxSpecVizBlit): proves the running exe.
+		// Painted at BOTH left corners — the texture's row 0 is screen BOTTOM.
+		constexpr float VIZ_EPOCH_GRAY = float(newtype::render::kRelaxVizEpoch) * 0.25f;
+		$if(coord.x < 24u & (coord.y < 24u | coord.y + 24u >= res.y)) {
+			viz = make_float3(VIZ_EPOCH_GRAY);
+		};
+		out_frame.write(coord, make_float4(viz, 1.0f));
+	});
+
+	// Spec-temporal viz (modes 13-15) display: RAW passthrough of the TA output
+	// plus the build-epoch marker. The former wiring blitted the ATROUS output
+	// (_relaxSpec[atrousResultIdx]) — 5 edge-aware blur iterations smeared the
+	// debug encoding (a small marker dissolves into the background, channel
+	// ramps smooth out), so every 13/14/15 reading was approximate. This blit
+	// reads the TA history buffer directly: colors arrive exactly as the TA
+	// encoded them (only HistoryFix sparse fills can touch the buffer in between).
+	_relaxSpecVizBlit = device.compile<2>([](
+		ImageFloat out_frame,
+		ImageFloat spec_input) noexcept {
+		set_name("relax_spec_viz_blit");
+		UInt2 coord = dispatch_id().xy();
+		UInt2 res = dispatch_size().xy();
+		Float3 viz = spec_input.read(coord).xyz();
+		// Build-epoch marker: solid 24x24 block at BOTH left corners, gray =
+		// epoch * 0.25 (light gray, ≈ #D0D0D0 through the display transform).
+		// DSL kernels compile only at app startup, so a capture from a stale
+		// instance is indistinguishable from a live one — except by this
+		// marker (and the window-title tag set at scene load). Both corners
+		// because texture row 0 is screen BOTTOM (y-up uv): epoch 3's marker
+		// landed at the bottom and read as "missing".
+		constexpr float VIZ_EPOCH_GRAY = float(newtype::render::kRelaxVizEpoch) * 0.25f;
+		$if(coord.x < 24u & (coord.y < 24u | coord.y + 24u >= res.y)) {
+			viz = make_float3(VIZ_EPOCH_GRAY);
+		};
+		out_frame.write(coord, make_float4(viz, 1.0f));
+	});
+
 	_clearImageShader = device.compile<2>([&](
 		ImageFloat output,
 		ImageFloat /*unused*/) noexcept {

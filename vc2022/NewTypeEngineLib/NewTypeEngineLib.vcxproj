@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NewTypeEngineLib — prebuilt static library (docs/prebuilt_dist.md).
+
+  Compiles the curated ENGINE_SOURCES manifest (shared with
+  tools/generate_project.py) + the runtime DLL machinery (_DEBUG only) +
+  cinder's glad.c against static /MD(d) cinder and the LuisaCompute import
+  libs. Debug serves both plain-Debug and Debug_Runtime (RT_RUNTIME)
+  consumers — the machinery is keyed on _DEBUG, never on RT_RUNTIME.
+
+  The dev exe stays source-compiled; this project is built on demand and by
+  tools/package_dist.py (the solution maps it ActiveCfg-only, so normal
+  Debug/Release solution builds skip it). No /GL/LTCG: consumers link the
+  same .lib from both VS and msbuild without PGO/LTCG toolchain coupling.
+-->
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7E9F1A2B-3C4D-4E5F-8A90-B1C2D3E4F5A6}</ProjectGuid>
+    <RootNamespace>NewTypeEngineLib</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <!-- Machine-local dependency roots (same set as the dev exe project) -->
+  <Import Project="..\NewTypeEngine.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Centralized compiler blob (defines, includes, options) -->
+  <ImportGroup Label="EngineCommon">
+    <Import Project="..\EngineCommon.props" />
+  </ImportGroup>
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>NewTypeEngine</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Lib>
+      <AdditionalOptions>/IGNORE:4221 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Lib>
+      <AdditionalOptions>/IGNORE:4221 %(AdditionalOptions)</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(CinderRoot)\src\glad\glad.c" />
+    <ClCompile Include="..\..\src\newtype\core\DxGLInterop.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\DxPresent.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\EngineVersion.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\LuisaGLInterop.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiser.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserAtrous.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserHistory.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserHitAndTemporal.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserPrefilter.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserPrepass.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserUtility.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassDI.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PassGI.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PipelineInit.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PipelineRender.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\PipelineUpdate.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\Renderer.cpp" />
+    <ClCompile Include="..\..\src\newtype\core\ShaderManager.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\BloomFeature.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\ChromaticAberrationFeature.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\DoFFeature.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\FxaaFeature.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\Gizmo.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\MotionBlurFeature.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\PointCloud.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\RasterContext.cpp" />
+    <ClCompile Include="..\..\src\newtype\feature\Trail.cpp" />
+    <ClCompile Include="..\..\src\newtype\media\VideoAudioNode.cpp" />
+    <ClCompile Include="..\..\src\newtype\audio\AmbisonicsNodes.cpp" />
+    <ClCompile Include="..\..\src\newtype\audio\SpatialAudio.cpp" />
+    <ClCompile Include="..\..\src\newtype\media\VideoAudioStream.cpp" />
+    <ClCompile Include="..\..\src\newtype\media\VideoDecoderD3D11.cpp" />
+    <ClCompile Include="..\..\src\newtype\media\VideoPlayer.cpp" />
+    <ClCompile Include="..\..\src\newtype\media\VideoTextureBridge.cpp" />
+    <ClCompile Include="..\..\src\newtype\plugin\MovieWriter.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\BSDF.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\BSSRDF.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\LightSampler.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\MaterialBuiltins.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\MaterialPool.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\PassSSS.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\PassSharc.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\Sampling.cpp" />
+    <ClCompile Include="..\..\src\newtype\render\TextureConverter.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\DeformableMesh.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\Geometry.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\InstancedMesh.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\Interaction.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\LightShape.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\MeshShape.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\ModelLoader.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\ProceduralGeometry.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\Shape.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\Transform.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\VATLoader.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\VATMesh.cpp" />
+    <ClCompile Include="..\..\src\newtype\scene\VoxelGrid.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\CurveUI.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\EasingCurve.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\EventTrigger.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\Gradient.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\PathHelper.cpp" />
+    <ClCompile Include="..\..\src\newtype\timeline\Timeline.cpp" />
+    <ClCompile Include="..\..\src\newtype\ngx\NgxContext.cpp" />
+    <ClCompile Include="..\..\src\newtype\ngx\DlssRayReconstruction.cpp" />
+    <ClCompile Include="..\..\src\newtype\upscal\DlssSrBackend.cpp" />
+    <ClCompile Include="..\..\src\newtype\upscal\Fsr31Backend.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Camera.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\CommandBuffer.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\LutLoader.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Mesh.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Noise.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Profiler.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Rand.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Recorder.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Rng.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\SoundController.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\UiHelper.cpp" />
+    <ClCompile Include="..\..\src\newtype\util\Utilities.cpp" />
+  </ItemGroup>
+  <!-- Runtime DLL machinery: Debug only (mirrors the _DEBUG guards). -->
+  <ItemGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile Include="..\..\src\newtype\runtime\CallableDLLLoader.cpp" />
+    <ClCompile Include="..\..\src\newtype\runtime\DLLHotReload.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\include\newtype\NewType.h" />
+    <ClInclude Include="..\..\include\newtype\core\BindingGroups.h" />
+    <ClInclude Include="..\..\include\newtype\core\Config.h" />
+    <ClInclude Include="..\..\include\newtype\core\DxGLInterop.h" />
+    <ClInclude Include="..\..\include\newtype\core\DxPresent.h" />
+    <ClInclude Include="..\..\include\newtype\core\EngineVersion.h" />
+    <ClInclude Include="..\..\include\newtype\core\FeatureContext.h" />
+    <ClInclude Include="..\..\include\newtype\core\FeaturePoint.h" />
+    <ClInclude Include="..\..\include\newtype\core\FrameContext.h" />
+    <ClInclude Include="..\..\include\newtype\core\IFeature.h" />
+    <ClInclude Include="..\..\include\newtype\core\IShaderGenerator.h" />
+    <ClInclude Include="..\..\include\newtype\core\IVoxelGridUser.h" />
+    <ClInclude Include="..\..\include\newtype\core\LuisaGLInterop.h" />
+    <ClInclude Include="..\..\include\newtype\core\Pipeline.h" />
+    <ClInclude Include="..\..\include\newtype\core\Renderer.h" />
+    <ClInclude Include="..\..\include\newtype\core\ShaderManager.h" />
+    <ClInclude Include="..\..\include\newtype\feature\BloomFeature.h" />
+    <ClInclude Include="..\..\include\newtype\feature\ChromaticAberrationFeature.h" />
+    <ClInclude Include="..\..\include\newtype\feature\DoFFeature.h" />
+    <ClInclude Include="..\..\include\newtype\feature\FxaaFeature.h" />
+    <ClInclude Include="..\..\include\newtype\feature\Gizmo.h" />
+    <ClInclude Include="..\..\include\newtype\feature\MotionBlurFeature.h" />
+    <ClInclude Include="..\..\include\newtype\feature\PointCloud.h" />
+    <ClInclude Include="..\..\include\newtype\feature\RasterBase.h" />
+    <ClInclude Include="..\..\include\newtype\feature\RasterContext.h" />
+    <ClInclude Include="..\..\include\newtype\feature\Trail.h" />
+    <ClInclude Include="..\..\include\newtype\media\AudioRingBuffer.h" />
+    <ClInclude Include="..\..\include\newtype\media\NativeTextureDesc.h" />
+    <ClInclude Include="..\..\include\newtype\media\VideoAudioNode.h" />
+    <ClInclude Include="..\..\include\newtype\audio\AmbisonicsNodes.h" />
+    <ClInclude Include="..\..\include\newtype\audio\SpatialAudio.h" />
+    <ClInclude Include="..\..\include\newtype\media\VideoAudioStream.h" />
+    <ClInclude Include="..\..\include\newtype\media\VideoDecoderD3D11.h" />
+    <ClInclude Include="..\..\include\newtype\media\VideoPlayer.h" />
+    <ClInclude Include="..\..\include\newtype\media\VideoTextureBridge.h" />
+    <ClInclude Include="..\..\include\newtype\plugin\MovieWriter.h" />
+    <ClInclude Include="..\..\include\newtype\render\BSDF.h" />
+    <ClInclude Include="..\..\include\newtype\render\BSSRDF.h" />
+    <ClInclude Include="..\..\include\newtype\render\DDAMarch.h" />
+    <ClInclude Include="..\..\include\newtype\render\GIBounce.h" />
+    <ClInclude Include="..\..\include\newtype\render\GIReservoir.h" />
+    <ClInclude Include="..\..\include\newtype\render\GIShading.h" />
+    <ClInclude Include="..\..\include\newtype\render\LightSampler.h" />
+    <ClInclude Include="..\..\include\newtype\render\Lobe.h" />
+    <ClInclude Include="..\..\include\newtype\render\Material.h" />
+    <ClInclude Include="..\..\include\newtype\render\MaterialPool.h" />
+    <ClInclude Include="..\..\include\newtype\render\MaterialSimilarity.h" />
+    <ClInclude Include="..\..\include\newtype\render\MetalData.h" />
+    <ClInclude Include="..\..\include\newtype\render\Packing.h" />
+    <ClInclude Include="..\..\include\newtype\render\PassDI.h" />
+    <ClInclude Include="..\..\include\newtype\render\PassDenoiser.h" />
+    <ClInclude Include="..\..\include\newtype\render\PassGI.h" />
+    <ClInclude Include="..\..\include\newtype\render\PassSSS.h" />
+    <ClInclude Include="..\..\include\newtype\render\PassSharc.h" />
+    <ClInclude Include="..\..\include\newtype\render\ProcBindlessSlots.h" />
+    <ClInclude Include="..\..\include\newtype\render\ProceduralTrace.h" />
+    <ClInclude Include="..\..\include\newtype\render\ReSTIR.h" />
+    <ClInclude Include="..\..\include\newtype\render\RelaxDenoiser.h" />
+    <ClInclude Include="..\..\include\newtype\render\Sampling.h" />
+    <ClInclude Include="..\..\include\newtype\render\Sharc.h" />
+    <ClInclude Include="..\..\include\newtype\render\Shading.h" />
+    <ClInclude Include="..\..\include\newtype\render\SurfaceData.h" />
+    <ClInclude Include="..\..\include\newtype\render\SurfaceResolver.h" />
+    <ClInclude Include="..\..\include\newtype\render\TextureConverter.h" />
+    <ClInclude Include="..\..\include\newtype\scene\DeformableMesh.h" />
+    <ClInclude Include="..\..\include\newtype\scene\Geometry.h" />
+    <ClInclude Include="..\..\include\newtype\scene\InstancedMesh.h" />
+    <ClInclude Include="..\..\include\newtype\scene\Interaction.h" />
+    <ClInclude Include="..\..\include\newtype\scene\LightShape.h" />
+    <ClInclude Include="..\..\include\newtype\scene\MeshShape.h" />
+    <ClInclude Include="..\..\include\newtype\scene\ModelLoader.h" />
+    <ClInclude Include="..\..\include\newtype\scene\ProceduralGeometry.h" />
+    <ClInclude Include="..\..\include\newtype\scene\Shape.h" />
+    <ClInclude Include="..\..\include\newtype\scene\Transform.h" />
+    <ClInclude Include="..\..\include\newtype\scene\VATLoader.h" />
+    <ClInclude Include="..\..\include\newtype\scene\VATMesh.h" />
+    <ClInclude Include="..\..\include\newtype\scene\VoxelGrid.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\CurveUI.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\EasingCurve.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\EventTrigger.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\Gradient.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\PathHelper.h" />
+    <ClInclude Include="..\..\include\newtype\timeline\Timeline.h" />
+    <ClInclude Include="..\..\include\newtype\ngx\NgxContext.h" />
+    <ClInclude Include="..\..\include\newtype\ngx\DlssRayReconstruction.h" />
+    <ClInclude Include="..\..\include\newtype\upscal\DlssSrBackend.h" />
+    <ClInclude Include="..\..\include\newtype\upscal\Fsr31Backend.h" />
+    <ClInclude Include="..\..\include\newtype\upscal\UpscalerBackend.h" />
+    <ClInclude Include="..\..\include\newtype\util\AccumulationTime.h" />
+    <ClInclude Include="..\..\include\newtype\util\Camera.h" />
+    <ClInclude Include="..\..\include\newtype\util\CommandBuffer.h" />
+    <ClInclude Include="..\..\include\newtype\util\CompileProfiler.h" />
+    <ClInclude Include="..\..\include\newtype\util\LutLoader.h" />
+    <ClInclude Include="..\..\include\newtype\util\Mesh.h" />
+    <ClInclude Include="..\..\include\newtype\util\MeshVertex.h" />
+    <ClInclude Include="..\..\include\newtype\util\Noise.h" />
+    <ClInclude Include="..\..\include\newtype\util\ParallelFor.h" />
+    <ClInclude Include="..\..\include\newtype\util\PixelOps.h" />
+    <ClInclude Include="..\..\include\newtype\util\Profiler.h" />
+    <ClInclude Include="..\..\include\newtype\util\Rand.h" />
+    <ClInclude Include="..\..\include\newtype\util\Recorder.h" />
+    <ClInclude Include="..\..\include\newtype\util\Rng.h" />
+    <ClInclude Include="..\..\include\newtype\util\Simplex.h" />
+    <ClInclude Include="..\..\include\newtype\util\SoundController.h" />
+    <ClInclude Include="..\..\include\newtype\util\TypeConv.h" />
+    <ClInclude Include="..\..\include\newtype\util\UiHelper.h" />
+    <ClInclude Include="..\..\include\newtype\util\Utilities.h" />
+    <ClInclude Include="..\..\include\newtype\util\VATData.h" />
+    <ClInclude Include="..\..\include\newtype\util\Vertex.h" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)'=='Debug'">
+    <ClInclude Include="..\..\include\newtype\runtime\CallableDLLLoader.h" />
+    <ClInclude Include="..\..\include\newtype\runtime\DLLHotReload.h" />
+    <ClInclude Include="..\..\include\newtype\runtime\Virtual.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

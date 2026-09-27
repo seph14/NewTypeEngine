@@ -45,8 +45,16 @@ struct PresampledCandidate {
     float bary_u;          // Barycentric u on light triangle (or envmap u)
     float bary_v;          // Barycentric v on light triangle (or envmap v)
     float inv_source_pdf;  // 1.0 / source_pdf
+    // Bary-interpolated world-space emitter point, precomputed at presample
+    // time (perf review R2 item 3; RTXDI RisLightDataBuffer pattern — the
+    // candidate loop's hottest path skips its per-pixel-per-candidate
+    // triangle_vertices read). Unused for env entries (zero). Formula order
+    // matches the former consumer exactly: bary_u*v0 + bary_v*v1 + (1-u-v)*v2.
+    float3 light_point;
 };
-static_assert(sizeof(PresampledCandidate) == 16u);
+// luisa::float3 is alignas(16)/sizeof(12), so the 28B of fields round the
+// stride to 32B — same per-entry cost as RTXDI's 2×uint4 compact light copy.
+static_assert(sizeof(PresampledCandidate) == 32u);
 
 } // namespace newtype::render
 
@@ -137,7 +145,7 @@ LUISA_STRUCT(newtype::render::Reservoir, light_idx, w_sum, target_pdf, light_bar
     }
 };
 
-LUISA_STRUCT(newtype::render::PresampledCandidate, light_idx, bary_u, bary_v, inv_source_pdf) {
+LUISA_STRUCT(newtype::render::PresampledCandidate, light_idx, bary_u, bary_v, inv_source_pdf, light_point) {
 
     [[nodiscard]] auto is_valid() const noexcept {
         return light_idx != ~0u;

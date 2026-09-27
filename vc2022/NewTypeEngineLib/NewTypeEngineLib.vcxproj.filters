@@ -1,0 +1,660 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\core">
+      <UniqueIdentifier>{40a4c5ea-0f80-50da-98a7-0268c14dd2b7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\feature">
+      <UniqueIdentifier>{4665f846-5a0c-5ebb-b605-a63f242b7444}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\media">
+      <UniqueIdentifier>{802c1591-eccc-56c4-b204-03cc3254c812}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\plugin">
+      <UniqueIdentifier>{0a95a729-bb78-55d5-8254-c08cb9ae4bfa}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\render">
+      <UniqueIdentifier>{f3b4037a-b9a9-54dc-b861-57711119d16b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\scene">
+      <UniqueIdentifier>{69ecdbde-a20e-5f8c-8a70-3ad4c02bfadc}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\timeline">
+      <UniqueIdentifier>{b47ef06f-7109-5c78-a438-c5ed29de4c05}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\ngx">
+      <UniqueIdentifier>{19a3ce16-5669-59de-95a6-e3024fadf98f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\upscal">
+      <UniqueIdentifier>{524e6562-332f-52c5-a174-2a2c11989446}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\util">
+      <UniqueIdentifier>{539884ef-e8e1-5c5b-98ed-ff35e5185856}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\runtime">
+      <UniqueIdentifier>{e0711455-1dec-5201-9059-7b7233bd3d11}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype">
+      <UniqueIdentifier>{2eff6458-2bd5-5ce0-9122-37db4562c476}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype">
+      <UniqueIdentifier>{8608b193-f1a8-53fc-9155-1611935783be}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\core">
+      <UniqueIdentifier>{666f0ea9-82e1-5a85-8ad9-044e76b9ee0d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\feature">
+      <UniqueIdentifier>{98520b76-388f-57ba-a1eb-0ac9baa86d46}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\media">
+      <UniqueIdentifier>{aeb76532-bdce-5353-8c5a-8124135da6fa}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\plugin">
+      <UniqueIdentifier>{f6d893fc-8989-5022-8d69-fe9f97d3ce90}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\render">
+      <UniqueIdentifier>{d15ce1aa-78dc-553a-ac86-c5e5cec4fe35}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\scene">
+      <UniqueIdentifier>{b1a9d715-7369-54d4-8082-1ab1415af04c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\timeline">
+      <UniqueIdentifier>{26af0dc8-e070-5f7b-822c-2559a1a26282}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\ngx">
+      <UniqueIdentifier>{65c9536d-ad85-5376-a591-3d546b9f9841}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\upscal">
+      <UniqueIdentifier>{32c24cc6-35f8-583f-9eb2-7697e12ea997}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\util">
+      <UniqueIdentifier>{922087e9-1339-5f41-8402-a4a05d3149f6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\runtime">
+      <UniqueIdentifier>{e6d3747c-2f96-5836-b737-f1ad6f63d1c1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\newtype\audio">
+      <UniqueIdentifier>{c2c0c66d-40a1-4d39-89b4-a066780124ed}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\newtype\audio">
+      <UniqueIdentifier>{25457591-0e44-44ea-b105-33951879af79}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(CinderRoot)\src\glad\glad.c">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\DxGLInterop.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\DxPresent.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\EngineVersion.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\LuisaGLInterop.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiser.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserAtrous.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserHistory.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserHitAndTemporal.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserPrefilter.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserPrepass.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDenoiserUtility.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassDI.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PassGI.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PipelineInit.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PipelineRender.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\PipelineUpdate.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\Renderer.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\core\ShaderManager.cpp">
+      <Filter>Source Files\newtype\core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\BloomFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\ChromaticAberrationFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\DoFFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\FxaaFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\Gizmo.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\MotionBlurFeature.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\PointCloud.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\RasterContext.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\feature\Trail.cpp">
+      <Filter>Source Files\newtype\feature</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\media\VideoAudioNode.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\media\VideoAudioStream.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\media\VideoDecoderD3D11.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\media\VideoPlayer.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\media\VideoTextureBridge.cpp">
+      <Filter>Source Files\newtype\media</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\plugin\MovieWriter.cpp">
+      <Filter>Source Files\newtype\plugin</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\BSDF.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\BSSRDF.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\LightSampler.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\MaterialBuiltins.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\MaterialPool.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\PassSSS.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\PassSharc.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\Sampling.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\render\TextureConverter.cpp">
+      <Filter>Source Files\newtype\render</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\DeformableMesh.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\Geometry.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\InstancedMesh.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\Interaction.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\LightShape.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\MeshShape.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\ModelLoader.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\ProceduralGeometry.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\Shape.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\Transform.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\VATLoader.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\VATMesh.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\scene\VoxelGrid.cpp">
+      <Filter>Source Files\newtype\scene</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\CurveUI.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\EasingCurve.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\EventTrigger.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\Gradient.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\PathHelper.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\timeline\Timeline.cpp">
+      <Filter>Source Files\newtype\timeline</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\ngx\NgxContext.cpp">
+      <Filter>Source Files\newtype\ngx</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\ngx\DlssRayReconstruction.cpp">
+      <Filter>Source Files\newtype\ngx</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\upscal\DlssSrBackend.cpp">
+      <Filter>Source Files\newtype\upscal</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\upscal\Fsr31Backend.cpp">
+      <Filter>Source Files\newtype\upscal</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Camera.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\CommandBuffer.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\LutLoader.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Mesh.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Noise.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Profiler.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Rand.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Recorder.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Rng.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\SoundController.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\UiHelper.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\util\Utilities.cpp">
+      <Filter>Source Files\newtype\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\audio\AmbisonicsNodes.cpp">
+      <Filter>Source Files\newtype\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\newtype\audio\SpatialAudio.cpp">
+      <Filter>Source Files\newtype\audio</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\include\newtype\NewType.h">
+      <Filter>Header Files\newtype</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\BindingGroups.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\Config.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\DxGLInterop.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\DxPresent.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\EngineVersion.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\FeatureContext.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\FeaturePoint.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\FrameContext.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\IFeature.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\IShaderGenerator.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\IVoxelGridUser.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\LuisaGLInterop.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\Pipeline.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\Renderer.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\core\ShaderManager.h">
+      <Filter>Header Files\newtype\core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\BloomFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\ChromaticAberrationFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\DoFFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\FxaaFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\Gizmo.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\MotionBlurFeature.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\PointCloud.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\RasterBase.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\RasterContext.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\feature\Trail.h">
+      <Filter>Header Files\newtype\feature</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\AudioRingBuffer.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\NativeTextureDesc.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\VideoAudioNode.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\VideoAudioStream.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\VideoDecoderD3D11.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\VideoPlayer.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\media\VideoTextureBridge.h">
+      <Filter>Header Files\newtype\media</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\plugin\MovieWriter.h">
+      <Filter>Header Files\newtype\plugin</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\BSDF.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\BSSRDF.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\DDAMarch.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\GIBounce.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\GIReservoir.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\GIShading.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\LightSampler.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Lobe.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Material.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\MaterialPool.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\MaterialSimilarity.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\MetalData.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Packing.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\PassDI.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\PassDenoiser.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\PassGI.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\PassSSS.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\PassSharc.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\ProcBindlessSlots.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\ProceduralTrace.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\ReSTIR.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\RelaxDenoiser.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Sampling.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Sharc.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\Shading.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\SurfaceData.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\SurfaceResolver.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\render\TextureConverter.h">
+      <Filter>Header Files\newtype\render</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\DeformableMesh.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\Geometry.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\InstancedMesh.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\Interaction.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\LightShape.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\MeshShape.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\ModelLoader.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\ProceduralGeometry.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\Shape.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\Transform.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\VATLoader.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\VATMesh.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\scene\VoxelGrid.h">
+      <Filter>Header Files\newtype\scene</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\CurveUI.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\EasingCurve.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\EventTrigger.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\Gradient.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\PathHelper.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\timeline\Timeline.h">
+      <Filter>Header Files\newtype\timeline</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\ngx\NgxContext.h">
+      <Filter>Header Files\newtype\ngx</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\ngx\DlssRayReconstruction.h">
+      <Filter>Header Files\newtype\ngx</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\upscal\DlssSrBackend.h">
+      <Filter>Header Files\newtype\upscal</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\upscal\Fsr31Backend.h">
+      <Filter>Header Files\newtype\upscal</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\upscal\UpscalerBackend.h">
+      <Filter>Header Files\newtype\upscal</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\AccumulationTime.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Camera.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\CommandBuffer.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\CompileProfiler.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\LutLoader.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Mesh.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\MeshVertex.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Noise.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\ParallelFor.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\PixelOps.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Profiler.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Rand.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Recorder.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Rng.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Simplex.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\SoundController.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\TypeConv.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\UiHelper.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Utilities.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\VATData.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\util\Vertex.h">
+      <Filter>Header Files\newtype\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\audio\AmbisonicsNodes.h">
+      <Filter>Header Files\newtype\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\include\newtype\audio\SpatialAudio.h">
+      <Filter>Header Files\newtype\audio</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

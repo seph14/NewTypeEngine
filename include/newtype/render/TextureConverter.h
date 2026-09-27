@@ -55,6 +55,7 @@ struct MaterialTextures {
     luisa::compute::Image<float> normal;
     luisa::compute::Image<float> rma;        // Combined R:roughness, G:metallic, B:AO
     luisa::compute::Image<float> emissive;
+    luisa::compute::Image<float> iridescence; // R:factor mask, G:thickness mix (min..max)
 
     // CPU-side pixel data for deferred upload (emptied after upload)
     luisa::vector<luisa::float4> albedoPixels;
@@ -76,6 +77,7 @@ struct MaterialTextures {
     [[nodiscard]] bool hasMetallic() const { return rma.valid(); }
     [[nodiscard]] bool hasAO() const { return rma.valid(); }
     [[nodiscard]] bool hasEmissive() const { return emissive.valid(); }
+    [[nodiscard]] bool hasIridescence() const { return iridescence.valid(); }
 };
 
 //==============================================================================
@@ -279,6 +281,7 @@ public:
     [[nodiscard]] static Image<float> loadAsset(
         const std::filesystem::path& assetPath,
         Device& device,
+        Stream* stream = nullptr,
         bool generateMipmaps = true,
         bool srgbToLinear = false);
 
@@ -295,6 +298,31 @@ public:
         const std::filesystem::path& filePath,
         Device& device,
         Stream* stream = nullptr,
+        bool srgbToLinear = false);
+
+    /**
+     * @brief Load image from an embedded exe resource (production twin of loadAsset)
+     *
+     * The Bundler rewrites literal `loadAsset("path", ...)` call sites into
+     * `loadResource(RES_NAME, ...)`, where the CINDER_RESOURCE macro expands
+     * into the leading (resourcePath, mswID, mswType) triple. The format is
+     * detected from resourcePath's extension, same as loadAsset.
+     *
+     * @param resourcePath Path carried by the CINDER_RESOURCE macro
+     * @param mswID Resource ID carried by the CINDER_RESOURCE macro
+     * @param mswType Resource type string carried by the CINDER_RESOURCE macro
+     * @param device LuisaCompute device
+     * @param generateMipmaps Whether to generate mipmaps for HDR formats (default: true)
+     * @param srgbToLinear Decode sRGB -> linear for 8-bit formats (default false)
+     * @return LuisaCompute image
+     */
+    [[nodiscard]] static Image<float> loadResource(
+        const std::filesystem::path& resourcePath,
+        int mswID,
+        const std::string& mswType,
+        Device& device,
+        Stream* stream = nullptr,
+        bool generateMipmaps = true,
         bool srgbToLinear = false);
 
     //==========================================================================

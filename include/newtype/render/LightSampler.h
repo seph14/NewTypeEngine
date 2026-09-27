@@ -153,7 +153,10 @@ public:
     void set_sun_intensity(float i) noexcept { _sunIntensity = i; }
     void set_ground_albedo(luisa::float3 a) noexcept { _groundAlbedo = a; }
 
-    void update_rotation_buffer(Stream &stream) noexcept;
+    // Uploads the rotation matrix when yaw/elevation changed. Returns true
+    // when a new matrix was queued — consumers with rotation-dependent cached
+    // GPU state (env presampled candidates) must order behind the upload.
+    bool update_rotation_buffer(Stream &stream) noexcept;
 
     /// Accessors
     [[nodiscard]] bool has_envmap() const noexcept { return _built; }
@@ -220,7 +223,7 @@ public:
         float         nz;             // 4  @ 24
         // Baked emissive color (copy of MaterialData::emission). Refreshed in
         // _upload_to_gpu / update_weights / update_transforms; lets every light-eval
-        // site skip the 176-byte MaterialData read it previously paid for .emission.
+        // site skip the 192-byte MaterialData read it previously paid for .emission.
         float         ex;             // 4  @ 28
         float         ey;             // 4  @ 32
         float         ez;             // 4  @ 36
@@ -371,21 +374,28 @@ public:
      *
      * @param u Random number [0, 1)
      * @return std::pair<triangle_index (UInt), pdf (Float)>
+     *
+     * The returned pdf is the selected triangle's power/total — the same
+     * value stored in TriangleLight::pdf — i.e. the pdf consumers must
+     * divide the contribution by (matches tri_light.pdf / area usage in
+     * the DI/GI/SHARC kernels).
      */
     [[nodiscard]] auto sample_light(const Float &u) const noexcept;
 
     /**
-     * @brief Sample light with 2D random numbers (returns UV too)
-     * @return std::pair<triangle_index (UInt), uv (Float2)>
-     * TODO: Also return PDF
+     * @brief Sample light with 3 random numbers (selection + surface point)
+     *
+     * u.x drives the alias-table selection, u.y/u.z sample the triangle
+     * surface (sqrt trick, same convention as the DI presample kernel).
+     * @return std::tuple<triangle_index (UInt), uv (Float2), pdf (Float)>
      */
-    [[nodiscard]] auto sample_light_with_uv(const Float2 &u) const noexcept;
+    [[nodiscard]] auto sample_light_with_uv(const Float3 &u) const noexcept;
 
     /**
      * @brief Get PDF of selecting a triangle light
      *
      * @param triangle_index Index returned by sample_light()
-     * @return Selection PDF (not including emission term)
+     * @return Selection PDF (power/total, not including emission term)
      */
     [[nodiscard]] Float light_pdf(const UInt &triangle_index) const noexcept;
 
@@ -408,6 +418,22 @@ public:
     // CPU-side Queries
     //==========================================================================
 
+    /**
+     * @brief Pure-CPU Vose alias table construction (unit-testable core)
+     *
+     * Builds an O(1)-sampling alias table realizing exactly the distribution
+     * weights[i] / sum(weights). Worklists carry residual (not-yet-placed)
+     * weights so each item's bucket is configured once with its remaining
+     * mass — the property every consumer relies on when it divides by
+     * TriangleLight::pdf (power/total).
+     *
+     * @param weights Non-negative per-entry weights (hidden lights use 0)
+     * @param count   Entry count (may be 0 → empty table)
+     * @param uniform_sampling Ignore weights, equal probability per entry
+     */
+    [[nodiscard]] static luisa::vector<AliasEntry> build_alias_table_cpu(
+        const float *weights, size_t count, bool uniform_sampling) noexcept;
+
     [[nodiscard]] uint emissive_triangle_count() const noexcept { return _total_emissive_count; }
     [[nodiscard]] float total_power() const noexcept { return _total_power; }
     [[nodiscard]] float total_power_inv() const noexcept { return _total_power_inv; }
@@ -423,7 +449,8 @@ public:
     void set_env_turbidity(float t) noexcept { _env_light.set_turbidity(t); }
     void generate_procedural_sky(Stream &stream) noexcept { _env_light.generate_procedural_sky(stream); }
     void regenerate_procedural_sky(Stream &stream) noexcept { _env_light.regenerate_procedural_sky(stream); }
-    void update_env_rotation(Stream &stream) noexcept { _env_light.update_rotation_buffer(stream); }
+    // Returns true when update_rotation_buffer queued a new matrix this call.
+    bool update_env_rotation(Stream &stream) noexcept { return _env_light.update_rotation_buffer(stream); }
 
     //==========================================================================
     // GPU Resource Access (for shader binding)

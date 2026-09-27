@@ -114,93 +114,82 @@ uint mesh_id = procGeom->add_static_mesh(
 
 ## Custom Deformation Shader
 
-The built-in deformation shader implements a simple wind effect. To use a custom deformation, modify `_deformShader` in `ProceduralGeometry::build()`, or subclass `ProceduralGeometry`.
+Deformation is a user shader registered with the core::ShaderManager and
+handed over via `set_deform_shader_id(shaderId, blockSize)` — call it before
+`add_deformable_instances()` (a build without one logs a warning and skips
+the deformation dispatch). `blockSize` is the dispatch block size; `1u`
+keeps the per-instance AABB/normals accumulation race-free (one thread per
+instance). Without a shader id, instances render the static base mesh.
 
-The shader receives per-instance state and base mesh data, writes deformed positions + normals + AABB.
+The shader writes deformed positions + UV-packed normals + per-instance AABBs.
+Reference implementation: `register_proc` in `src/tests/TetCageScene.cpp`
+(full wind shader with angle-weighted normal recomputation).
 
 ### Shader Signature
 
+11 buffer parameters, in dispatch order (contract:
+ProceduralGeometry.h, `set_deform_shader_id`):
+
 ```cpp
-auto deformShader = device.compile<1>(
-    [deformStartIdx]( // capture _deformStartIdx for index mapping
-        BufferVar<float3> positions,       // rw: per-instance positions
-        BufferVar<float3> normals,         // rw: per-instance normals
-        BufferVar<AABB> aabbs,             // w:  output AABBs
-        BufferVar<ProcInstanceData> instances, // r: instance data
-        BufferVar<ProcDeformState> states,     // r: deformation state
-        BufferVar<float3> base_positions,  // r: undeformed base mesh
-        BufferVar<uint> base_offsets,      // r: mesh_id → offset in base_positions
-        BufferVar<compute::Triangle> indices // r: triangle indices
-    ) noexcept {
-        UInt deform_idx = dispatch_id().x;
-        UInt idx = deformStartIdx + deform_idx;
-        Var<ProcInstanceData> inst = instances.read(idx);
-        Var<ProcDeformState> state = states.read(deform_idx);
+core::ShaderManager::instance().registerShader<2>("my_deform",
+    [](compute::BufferVar<luisa::float4> positions,          // rw: deformed pos, uv_u in .w
+       compute::BufferVar<luisa::float4> normals,            // rw: normals, uv_v in .w
+       compute::BufferVar<compute::AABB> aabbs,              // w:  per-instance AABBs
+       compute::BufferVar<scene::ProcInstanceData> instances,// r:  instance table
+       compute::BufferVar<scene::ProcDeformState> states,    // r:  deformation state
+       compute::BufferVar<luisa::float3> base_positions,     // r:  undeformed base mesh
+       compute::BufferVar<luisa::float3> base_normals,       // r:  base normals
+       compute::BufferVar<uint> base_offsets,                // r:  mesh_id -> offset in base_positions
+       compute::BufferVar<compute::Triangle> indices,        // r:  triangle indices
+       compute::BufferVar<luisa::float2> static_uvs,         // r:  base UVs (mesh_meta.uv_base + v)
+       compute::BufferVar<scene::ProcMeshMeta> mesh_meta) noexcept {
+    UInt idx = dispatch_id().x;
+    Var<scene::ProcInstanceData> inst = instances.read(idx);
+    Var<scene::ProcDeformState> state = states.read(idx);
 
-        // Read state params
-        Float time_val  = state.params[0].x;
-        Float strength  = state.params[0].y;
-        Float freq      = state.params[0].z;
-        Float phase     = state.params[0].w;
+    // Read state params
+    Float time_val  = state.params[0].x;
+    Float strength  = state.params[0].y;
+    Float freq      = state.params[0].z;
 
-        // Instance layout
-        UInt base_offset = base_offsets.read(inst.mesh_id);
-        UInt frame_idx   = cast<UInt>(inst.param);     // local index in batch
-        UInt pos_base    = inst.packed_offsets & 0xFFFFu;
-        UInt idx_base    = inst.packed_offsets >> 16u;
+    // Instance layout
+    UInt base_offset = base_offsets.read(inst.mesh_id);
+    UInt frame_idx   = cast<UInt>(inst.param);     // local index in batch
+    UInt pos_base    = inst.packed_offsets & 0xFFFFu;
+    UInt idx_base    = inst.packed_offsets >> 16u;
 
-        // Deform vertices
-        Float3 aabb_min = make_float3(1e10f);
-        Float3 aabb_max = make_float3(-1e10f);
+    Float3 aabb_min = make_float3(1e10f);
+    Float3 aabb_max = make_float3(-1e10f);
 
-        $for(v, inst.vertex_count) {
-            Float3 base_pos = base_positions.read(base_offset + v);
+    $for(v, inst.vertex_count) {
+        Float3 base_pos = base_positions.read(base_offset + v);
 
-            // -- YOUR DEFORMATION HERE --
-            Float bend = strength * sin(time_val * freq + phase + base_pos.y * 2.0f);
-            Float3 deformed = make_float3(
-                base_pos.x + bend,
-                base_pos.y,
-                base_pos.z + bend * 0.3f);
+        // -- YOUR DEFORMATION HERE --
+        Float bend = strength * sin(time_val * freq + base_pos.y * 2.0f);
+        Float3 deformed = make_float3(
+            base_pos.x + bend,
+            base_pos.y,
+            base_pos.z + bend * 0.3f);
 
-            positions.write(pos_base + v, deformed);
-            aabb_min = min(aabb_min, deformed);
-            aabb_max = max(aabb_max, deformed);
-        };
+        Float2 uv = static_uvs.read(mesh_meta.read(inst.mesh_id).uv_base + v);
+        positions.write(pos_base + v, make_float4(deformed, uv.x));
+        aabb_min = min(aabb_min, deformed);
+        aabb_max = max(aabb_max, deformed);
+    };
 
-        // Recompute normals (angle-weighted vertex normals)
-        $for(v, inst.vertex_count) {
-            normals.write(pos_base + v, make_float3(0.0f));
-        };
-        $for(t, inst.tri_count) {
-            auto tri = indices.read(idx_base + t);
-            Float3 p0 = positions.read(pos_base + tri.i0);
-            Float3 p1 = positions.read(pos_base + tri.i1);
-            Float3 p2 = positions.read(pos_base + tri.i2);
-            Float3 fn = cross(p1 - p0, p2 - p0);
-            Float area = length(fn);
-            $if(area > 1e-8f) {
-                Float3 n = fn / area;
-                // accumulate angle-weighted normals per vertex...
-                Float cos_a = dot(normalize(p1 - p0), normalize(p2 - p0));
-                Float3 prev0 = normals.read(pos_base + tri.i0);
-                normals.write(pos_base + tri.i0,
-                    prev0 + n * acos(clamp(cos_a, -1.0f, 1.0f)));
-                // ... same for tri.i1, tri.i2
-            };
-        };
-        $for(v, inst.vertex_count) {
-            Float3 n = normals.read(pos_base + v);
-            Float len = length(n);
-            $if(len > 1e-8f) { normals.write(pos_base + v, n / len); };
-        };
+    // Recompute normals (angle-weighted vertex normals):
+    // zero -> accumulate per-face -> normalize, packing uv_v into .w
+    // (see register_proc in src/tests/TetCageScene.cpp for the full loop).
 
-        // Write AABB
-        Var<AABB> aabb;
-        aabb.packed_min = { aabb_min.x, aabb_min.y, aabb_min.z };
-        aabb.packed_max = { aabb_max.x, aabb_max.y, aabb_max.z };
-        aabbs.write(idx, aabb);
-    });
+    // Write AABB. params[0].w < 0 collapses it: the instance stops
+    // generating candidates (per-instance visibility toggle).
+    Var<AABB> aabb;
+    aabb.packed_min = { aabb_min.x, aabb_min.y, aabb_min.z };
+    aabb.packed_max = { aabb_max.x, aabb_max.y, aabb_max.z };
+    aabbs.write(idx, aabb);
+});
+
+procGeom->set_deform_shader_id("my_deform", 1u);
 ```
 
 ### Param Layout Convention
@@ -303,8 +292,9 @@ During `build()`, instances are stable-partitioned so all type=3 are contiguous.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `add_static_mesh(triMesh)` | `uint mesh_id` | Register from a `ci::TriMesh` (auto-converts positions/normals/indices) |
-| `add_static_mesh(positions, normals, indices, vertex_count)` | `uint mesh_id` | Register from raw `float3`/`Triangle` spans |
-| `add_deformable_instances(mesh_id, count, material_layers, initial_states)` | `uint first_instance_idx` | Create N deformable instances of a mesh |
+| `add_static_mesh(positions, normals, indices, vertex_count)` | `uint mesh_id` | Register from raw `float3`/`Triangle` spans (optional UV span as 5th arg) |
+| `set_deform_shader_id(shaderId, blockSize)` | — | Set the deform shader (ShaderManager id); call before `add_deformable_instances()` |
+| `add_deformable_instances(mesh_id, count, material_layers, initial_states, double_sided)` | `uint first_instance_idx` | Create N deformable instances of a mesh |
 
 ### State Updates (anytime after `build()`)
 

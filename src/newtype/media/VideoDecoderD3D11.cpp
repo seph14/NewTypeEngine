@@ -32,7 +32,8 @@ VideoDecoderD3D11::~VideoDecoderD3D11() {
 
 bool VideoDecoderD3D11::open(std::filesystem::path const& path,
                              ID3D12Device* luisaDevice,
-                             Mode mode) {
+                             Mode mode,
+                             double internalPrerollSec) {
     if (_reader) {
         CI_LOG_W("VideoDecoderD3D11::open called while already open; ignoring");
         return false;
@@ -50,6 +51,7 @@ bool VideoDecoderD3D11::open(std::filesystem::path const& path,
     ++s_instanceCount;
 
     _mode = mode;
+    _internalPrerollSec = std::max(0.0, internalPrerollSec);
 
     bool ok = (_mode == Mode::CpuRgb32)
         ? _open_cpu_rgb32(path)
@@ -88,7 +90,7 @@ bool VideoDecoderD3D11::_open_cpu_rgb32(std::filesystem::path const& path) {
     if (!_configure_rgb32_cpu_output()) return false;
     if (!_query_frame_metrics())         return false;
 
-    CI_LOG_I("VideoDecoderD3D11 opened (CpuRgb32): "
+    CI_LOG_D("VideoDecoderD3D11 opened (CpuRgb32): "
              << _width << "x" << _height
              << ", stride=" << _cpuStride
              << ", duration=" << _durationSec << "s");
@@ -149,10 +151,10 @@ bool VideoDecoderD3D11::_open_hardware_nv12(std::filesystem::path const& path,
     if (!_query_frame_metrics())      return false;
     if (!_init_video_processor())    return false;
 
-    CI_LOG_I("VideoDecoderD3D11 opened (HardwareNV12): "
+    CI_LOG_D("VideoDecoderD3D11 opened (HardwareNV12): "
              << _width << "x" << _height
              << ", duration=" << _durationSec << "s"
-             << " (NV12 → RGBA8 via Video Processor, BT.709)");
+             << " (NV12 -> RGBA8 via Video Processor, BT.709)");
     return true;
 }
 
@@ -178,7 +180,7 @@ bool VideoDecoderD3D11::_create_d3d11_device_on_luid(ID3D12Device* luisaDevice,
             desc.AdapterLuid.HighPart == luLuid.HighPart) {
             char descBuf[128] = {};
             std::wcstombs(descBuf, desc.Description, sizeof(descBuf) - 1);
-            CI_LOG_I("D3D11 device will use adapter '" << descBuf
+            CI_LOG_D("D3D11 device will use adapter '" << descBuf
                      << "' (LUID match with D3D12: low=0x" << std::hex
                      << desc.AdapterLuid.LowPart << " high=0x"
                      << desc.AdapterLuid.HighPart << std::dec << ")");
@@ -227,17 +229,26 @@ bool VideoDecoderD3D11::_create_d3d11_device_on_luid(ID3D12Device* luisaDevice,
     hr = _d3d11Device->QueryInterface(IID_PPV_ARGS(&multithread));
     if (SUCCEEDED(hr) && multithread) {
         multithread->SetMultithreadProtected(TRUE);
-        CI_LOG_I("D3D11 device multithread protection enabled");
+        CI_LOG_D("D3D11 device multithread protection enabled");
     } else {
         CI_LOG_W("Failed to enable D3D11 multithread protection (hr=0x"
-                 << std::hex << hr << ") — VP/Map may hang under concurrent MF access");
+                 << std::hex << hr << ") - VP/Map may hang under concurrent MF access");
     }
     return true;
 }
 
 bool VideoDecoderD3D11::_configure_nv12_hw_output() {
+    // Deselect every stream, then re-select video only. SourceReaders select
+    // ALL streams by default, so without this the demuxer queues audio packets
+    // in its internal queues on audio-containing files (memory growth, slower
+    // seeks). Video's audio lives in the VideoAudioStream side-channel.
+    HRESULT hr = _reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    if (FAILED(hr)) return false;
+    hr = _reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    if (FAILED(hr)) return false;
+
     ComPtr<IMFMediaType> outType;
-    HRESULT hr = MFCreateMediaType(&outType);
+    hr = MFCreateMediaType(&outType);
     if (FAILED(hr)) return false;
     if (FAILED(outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))) return false;
     if (FAILED(outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12))) return false;
@@ -246,7 +257,7 @@ bool VideoDecoderD3D11::_configure_nv12_hw_output() {
         MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, outType.Get());
     if (FAILED(hr)) {
         CI_LOG_E("SetCurrentMediaType(NV12) failed: hr=0x" << std::hex << hr
-                 << " — asset decoder may not natively output NV12"
+                 << " - asset decoder may not natively output NV12"
                  << " (try CpuRgb32 mode for graceful fallback)");
         return false;
     }
@@ -255,7 +266,7 @@ bool VideoDecoderD3D11::_configure_nv12_hw_output() {
 
 //------------------------------------------------------------------------------
 // Phase 3: stand up the D3D11 Video Processor for NV12 → RGBA8 conversion.
-// Per-frame blt happens in _convert_nv12_to_rgba8().
+// Per-frame blt happens in _blt_nv12_to_internal().
 //------------------------------------------------------------------------------
 bool VideoDecoderD3D11::_init_video_processor() {
     ComPtr<ID3D11VideoDevice> videoDevice;
@@ -312,10 +323,12 @@ bool VideoDecoderD3D11::_init_video_processor() {
         return false;
     }
 
-    // Allocate our RGBA8 output textures — two of them:
-    //   _rgba8TextureInternal: VP output target. Plain texture, no shared flags.
-    //     VP rejects KEYEDMUTEX-flagged textures as output on some drivers
-    //     (E_INVALIDARG on VideoProcessorBlt).
+    // Allocate our RGBA8 output textures:
+    //   _internalTex[0..N-1]: VP output targets, plain textures, no shared
+    //     flags (VP rejects KEYEDMUTEX-flagged textures as output on some
+    //     drivers — E_INVALIDARG on VideoProcessorBlt). Multiple slots let a
+    //     decode thread run ahead of the display clock; count from the
+    //     requested pre-roll, capped at 8 and by a ~128 MB texture budget.
     //   _rgba8Texture: shared with D3D12 via NT handle + keyed mutex. We
     //     CopyResource from internal→shared per frame under the mutex.
     D3D11_TEXTURE2D_DESC rgba8Desc{};
@@ -328,11 +341,45 @@ bool VideoDecoderD3D11::_init_video_processor() {
     rgba8Desc.Usage            = D3D11_USAGE_DEFAULT;
     rgba8Desc.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
-    ComPtr<ID3D11Texture2D> rgba8Internal;
-    hr = _d3d11Device->CreateTexture2D(&rgba8Desc, nullptr, &rgba8Internal);
-    if (FAILED(hr)) {
-        CI_LOG_E("CreateTexture2D(RGBA8 internal) failed: hr=0x" << std::hex << hr);
-        return false;
+    _internalSlotCount = 1;
+    if (_internalPrerollSec > 0.0) {
+        double const dur = (_frameDurationSec > 0.0) ? _frameDurationSec : (1.0 / 30.0);
+        size_t const frameBytes =
+            static_cast<size_t>(_width) * static_cast<size_t>(_height) * 4u;
+        size_t const byTime =
+            static_cast<size_t>(std::ceil(_internalPrerollSec / dur)) + 1;
+        size_t const budgetFrames = frameBytes > 0
+            ? ((size_t{128} << 20) / frameBytes) : 3;
+        size_t const byMem = std::max<size_t>(3, budgetFrames);
+        _internalSlotCount = static_cast<uint32_t>(
+            std::clamp<size_t>(byTime, 3, std::min<size_t>(8, byMem)));
+    }
+    _internalTex.assign(_internalSlotCount, nullptr);
+    _internalView.assign(_internalSlotCount, nullptr);
+    _internalWrite    = 0;
+    _lastInternalSlot = 0;
+    for (uint32_t i = 0; i < _internalSlotCount; ++i) {
+        ComPtr<ID3D11Texture2D> rgba8Internal;
+        hr = _d3d11Device->CreateTexture2D(&rgba8Desc, nullptr, &rgba8Internal);
+        if (FAILED(hr)) {
+            CI_LOG_E("CreateTexture2D(RGBA8 internal) failed: hr=0x" << std::hex << hr);
+            return false;
+        }
+        // Output view — on the internal (non-shared) texture. VP writes here;
+        // we then CopyResource to the shared texture under keyed mutex.
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ovDesc{};
+        ovDesc.ViewDimension      = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        ovDesc.Texture2D.MipSlice = 0;
+
+        ComPtr<ID3D11VideoProcessorOutputView> outputView;
+        hr = videoDevice->CreateVideoProcessorOutputView(
+            rgba8Internal.Get(), enumerator.Get(), &ovDesc, &outputView);
+        if (FAILED(hr)) {
+            CI_LOG_E("CreateVideoProcessorOutputView failed: hr=0x" << std::hex << hr);
+            return false;
+        }
+        _internalTex[i]  = rgba8Internal.Detach();
+        _internalView[i] = outputView.Detach();
     }
 
     // Same desc + shared flags for the cross-API texture.
@@ -408,20 +455,6 @@ bool VideoDecoderD3D11::_init_video_processor() {
         return false;
     }
 
-    // Output view — on the internal (non-shared) texture. VP writes here;
-    // we then CopyResource to the shared texture under keyed mutex.
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ovDesc{};
-    ovDesc.ViewDimension     = D3D11_VPOV_DIMENSION_TEXTURE2D;
-    ovDesc.Texture2D.MipSlice = 0;
-
-    ComPtr<ID3D11VideoProcessorOutputView> outputView;
-    hr = videoDevice->CreateVideoProcessorOutputView(
-        rgba8Internal.Get(), enumerator.Get(), &ovDesc, &outputView);
-    if (FAILED(hr)) {
-        CI_LOG_E("CreateVideoProcessorOutputView failed: hr=0x" << std::hex << hr);
-        return false;
-    }
-
     // Configure color spaces:
     //   Input  (NV12): BT.709, limited range 16-235
     //   Output (RGBA8): full range 0-255
@@ -458,14 +491,12 @@ bool VideoDecoderD3D11::_init_video_processor() {
     _videoEnum           = enumerator.Detach();
     _videoProcessor      = vp.Detach();
     _rgba8Texture        = rgba8Tex.Detach();
-    _rgba8TextureInternal = rgba8Internal.Detach();
-    _rgba8OutputView     = outputView.Detach();
     _nv12Copy            = nv12Copy.Detach();
     _nv12InputView       = nv12InputView.Detach();
     _keyedMutex          = keyedMutex.Detach();
     _sharedHandle        = sharedHandle;
 
-    // Cached event query for GPU completion sync (see _convert_nv12_to_rgba8).
+    // Cached event query for GPU completion sync (see publish_frame_to_shared).
     D3D11_QUERY_DESC qDesc{};
     qDesc.Query     = D3D11_QUERY_EVENT;
     qDesc.MiscFlags = 0;
@@ -473,16 +504,17 @@ bool VideoDecoderD3D11::_init_video_processor() {
     hr = _d3d11Device->CreateQuery(&qDesc, &gpuDoneQuery);
     if (FAILED(hr)) {
         CI_LOG_W("CreateQuery(EVENT) failed: hr=0x" << std::hex << hr
-                 << " — cross-API GPU sync will be unreliable");
+                 << " - cross-API GPU sync will be unreliable");
     }
     _gpuDoneQuery = gpuDoneQuery.Detach();
 
-    CI_LOG_I("Phase 4: RGBA8 shared via NT handle (VP→internal→shared), keyed mutex ready");
+    CI_LOG_D("Phase 4: RGBA8 shared via NT handle (VP->internal->shared), keyed mutex ready");
     return true;
 }
 
-bool VideoDecoderD3D11::_convert_nv12_to_rgba8() {
-    if (!_videoProcessor || !_hwTexture || !_rgba8OutputView || !_nv12Copy || !_nv12InputView) {
+bool VideoDecoderD3D11::_blt_nv12_to_internal() {
+    if (!_videoProcessor || !_hwTexture || _internalTex.empty() || _internalView.empty()
+        || !_nv12Copy || !_nv12InputView) {
         return false;
     }
 
@@ -528,13 +560,23 @@ bool VideoDecoderD3D11::_convert_nv12_to_rgba8() {
     stream.FutureFrames      = 0;
     stream.pInputSurface     = _nv12InputView;
 
-    // VP writes to _rgba8TextureInternal (plain texture, no KEYEDMUTEX).
+    // VP writes to the current internal slot (plain textures, no KEYEDMUTEX).
+    // The caller guarantees the slot's previous frame was already published
+    // (at most _internalSlotCount - 1 unpublished decodes in flight).
     HRESULT hr = _videoContext->VideoProcessorBlt(
-        _videoProcessor, _rgba8OutputView, 0, 1, &stream);
+        _videoProcessor, _internalView[_internalWrite], 0, 1, &stream);
     if (FAILED(hr)) {
         CI_LOG_E("VideoProcessorBlt failed: hr=0x" << std::hex << hr);
         return false;
     }
+    _lastInternalSlot = _internalWrite;
+    _internalWrite    = (_internalWrite + 1) % _internalSlotCount;
+    return true;
+}
+
+bool VideoDecoderD3D11::publish_frame_to_shared(uint32_t internalSlot) {
+    if (_mode != Mode::HardwareNV12 || !_rgba8Texture) return true;  // CPU mode: nothing shared
+    if (internalSlot >= _internalTex.size() || !_internalTex[internalSlot]) return false;
 
     // Promote to the shared texture under keyed mutex. Phase 4 uses key 0 on
     // both sides (D3D11 producer and D3D12 consumer) — simpler than the
@@ -542,7 +584,7 @@ bool VideoDecoderD3D11::_convert_nv12_to_rgba8() {
     // every frame or deadlock. Phase 6 will revisit if we need stricter
     // producer/consumer phasing.
     if (_keyedMutex) _keyedMutex->AcquireSync(0, INFINITE);
-    _d3d11Context->CopyResource(_rgba8Texture, _rgba8TextureInternal);
+    _d3d11Context->CopyResource(_rgba8Texture, _internalTex[internalSlot]);
     _d3d11Context->Flush();
 
     // Force GPU completion before handing the mutex off. D3D11's Flush only
@@ -552,7 +594,7 @@ bool VideoDecoderD3D11::_convert_nv12_to_rgba8() {
         _d3d11Context->End(_gpuDoneQuery);
         BOOL done = FALSE;
         while (_d3d11Context->GetData(_gpuDoneQuery, &done, sizeof(done), 0) == S_FALSE) {
-            // spin until GPU completes the queued CopyResource + VP blt
+            // spin until GPU completes the queued CopyResource
         }
     }
 
@@ -634,8 +676,15 @@ bool VideoDecoderD3D11::readback_rgba8_to_cpu(std::vector<uint8_t>& outPixels,
 }
 
 bool VideoDecoderD3D11::_configure_rgb32_cpu_output() {
+    // Deselect all streams, video only — see the same dance in
+    // _configure_nv12_hw_output for why.
+    HRESULT hr = _reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    if (FAILED(hr)) return false;
+    hr = _reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+    if (FAILED(hr)) return false;
+
     ComPtr<IMFMediaType> outType;
-    HRESULT hr = MFCreateMediaType(&outType);
+    hr = MFCreateMediaType(&outType);
     if (FAILED(hr)) return false;
     if (FAILED(outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))) return false;
     if (FAILED(outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32))) return false;
@@ -644,7 +693,7 @@ bool VideoDecoderD3D11::_configure_rgb32_cpu_output() {
         MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, outType.Get());
     if (FAILED(hr)) {
         CI_LOG_E("SetCurrentMediaType(RGB32) failed: hr=0x" << std::hex << hr
-                 << " — asset may be a codec RGB32 can't convert from");
+                 << " - asset may be a codec RGB32 can't convert from");
         return false;
     }
     return true;
@@ -706,6 +755,11 @@ bool VideoDecoderD3D11::_query_frame_metrics() {
 }
 
 bool VideoDecoderD3D11::read_next_frame() {
+    if (!decode_next_frame()) return false;
+    return publish_frame_to_shared(_lastInternalSlot);
+}
+
+bool VideoDecoderD3D11::decode_next_frame() {
     if (!_reader) return false;
 
     DWORD     flags = 0;
@@ -747,7 +801,7 @@ bool VideoDecoderD3D11::read_next_frame() {
     bool ok = false;
     if (_mode == Mode::HardwareNV12) {
         ok = _extract_hw_texture(sample.Get())
-          && _convert_nv12_to_rgba8();
+          && _blt_nv12_to_internal();
     } else {
         ok = _copy_cpu_buffer(sample.Get());
     }
@@ -798,7 +852,7 @@ bool VideoDecoderD3D11::_extract_hw_texture(IMFSample* sample) {
     if (FAILED(hr)) {
         CI_LOG_E("Sample buffer is not IMFDXGIBuffer (hr=0x"
                  << std::hex << hr
-                 << ") — D3D11 device not wired to MF?");
+                 << ") - D3D11 device not wired to MF?");
         return false;
     }
 
@@ -823,7 +877,7 @@ bool VideoDecoderD3D11::_extract_hw_texture(IMFSample* sample) {
     if (!s_firstDescLogged) {
         D3D11_TEXTURE2D_DESC desc{};
         _hwTexture->GetDesc(&desc);
-        CI_LOG_I("[Phase2] NV12 decoder texture desc:"
+        CI_LOG_D("[Phase2] NV12 decoder texture desc:"
                  << " format=0x" << std::hex << desc.Format
                  << " arraySize=" << std::dec << desc.ArraySize
                  << " w=" << desc.Width << " h=" << desc.Height
@@ -867,9 +921,15 @@ void VideoDecoderD3D11::close() {
     _stagingWidth = _stagingHeight = 0;
 
     // Phase 3 + 4: Video Processor resources + shared handle
-    if (_rgba8OutputView)     { _rgba8OutputView->Release();     _rgba8OutputView     = nullptr; }
+    for (auto* view : _internalView) if (view) view->Release();
+    for (auto* tex  : _internalTex)  if (tex)  tex->Release();
+    _internalView.clear();
+    _internalTex.clear();
+    _internalSlotCount = 1;
+    _internalWrite     = 0;
+    _lastInternalSlot  = 0;
+    _internalPrerollSec = 0.0;
     if (_rgba8Texture)        { _rgba8Texture->Release();        _rgba8Texture        = nullptr; }
-    if (_rgba8TextureInternal){ _rgba8TextureInternal->Release();_rgba8TextureInternal= nullptr; }
     if (_nv12InputView)       { _nv12InputView->Release();       _nv12InputView       = nullptr; }
     if (_nv12Copy)            { _nv12Copy->Release();            _nv12Copy            = nullptr; }
     if (_keyedMutex)          { _keyedMutex->Release();          _keyedMutex          = nullptr; }

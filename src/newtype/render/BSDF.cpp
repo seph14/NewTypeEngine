@@ -83,6 +83,100 @@ Float3 eval_thin_film_iridescence(
     return impl(cos_theta_d, thin_film_ior, thickness);
 }
 
+#if NT_ENABLE_BELCOUR_IRIDESCENCE
+
+//==============================================================================
+// Thin-Film Iridescence — Belcour & Barla 2017
+// (port of the KHR_materials_iridescence reference implementation)
+//==============================================================================
+
+// Gaussian fit of the CIE XYZ color matching functions. Maps an optical path
+// difference (nm) plus phase shift to a linear Rec.709 RGB sensitivity — the
+// analytic spectral integration kernel of the thin-film model.
+Float3 eval_iridescence_sensitivity(Expr<float> opd, Expr<float3> shift) noexcept {
+    static Callable impl = [](Float opd, Float3 shift) noexcept {
+        constexpr float kPi = 3.14159265359f;
+        Float phase = 2.0f * kPi * opd * 1.0e-9f;
+
+        Float3 val = make_float3(5.4856e-13f, 4.4201e-13f, 5.2481e-13f);
+        Float3 pos = make_float3(1.6810e+06f, 1.7953e+06f, 2.2084e+06f);
+        Float3 var = make_float3(4.3278e+09f, 9.3046e+09f, 6.6121e+09f);
+
+        Float3 xyz = val * sqrt(make_float3(2.0f * kPi) * var)
+                   * cos(pos * phase + shift)
+                   * exp(-sqr(make_float3(phase)) * var);
+        // Extra Gaussian correcting the x-bar double lobe
+        xyz.x += 9.7470e-14f * sqrt(2.0f * kPi * 4.5282e+09f)
+               * cos(2.2399e+06f * phase + shift.x)
+               * exp(-4.5282e+09f * sqr(phase));
+        xyz /= 1.0685e-7f;
+
+        // XYZ -> linear Rec.709
+        return make_float3(
+            dot(make_float3( 3.2404542f, -1.5371385f, -0.4985314f), xyz),
+            dot(make_float3(-0.9692660f,  1.8760108f,  0.0415560f), xyz),
+            dot(make_float3( 0.0556434f, -0.2040259f,  1.0572252f), xyz));
+    };
+    return impl(opd, shift);
+}
+
+Float3 eval_iridescence_fresnel(
+    Expr<float> cos_theta1,
+    Expr<float> outside_ior,
+    Expr<float> film_ior,
+    Expr<float> thickness_nm,
+    Expr<luisa::float3> base_f0) noexcept {
+    static Callable impl = [](Float cos_theta1, Float outside_ior, Float film_ior,
+                              Float thickness_nm, Float3 base_f0) noexcept {
+        constexpr float kPi = 3.14159265359f;
+        auto pow5 = [](auto&& v) { return sqr(sqr(v)) * v; };
+
+        // Snell into the film
+        Float sin2_theta2 = sqr(outside_ior / film_ior) * max(1.0f - sqr(cos_theta1), 0.0f);
+        Float cos_theta2  = sqrt(max(1.0f - sin2_theta2, 0.0f));
+
+        // First interface (outside -> film), scalar Schlick
+        Float R0_12 = sqr((film_ior - outside_ior) / (film_ior + outside_ior));
+        Float R12   = R0_12 + (1.0f - R0_12) * pow5(max(1.0f - cos_theta1, 0.0f));
+        Float T121  = 1.0f - R12;
+
+        // Second interface (film -> substrate): recover the substrate IOR from
+        // the base F0 (+ guard against F0 == 1), then Schlick per channel.
+        // This is what makes the model substrate-aware: a film over gold and a
+        // film over black plastic now interfere differently.
+        Float3 sqrt_f0 = sqrt(base_f0 + 1e-4f);
+        Float3 base_ior = (make_float3(1.0f) + sqrt_f0) / (make_float3(1.0f) - sqrt_f0);
+        Float3 R0_23 = sqr((base_ior - film_ior) / (base_ior + film_ior));
+        Float3 R23   = R0_23 + (make_float3(1.0f) - R0_23) * pow5(max(1.0f - cos_theta2, 0.0f));
+
+        // Phase flips: half-cycle loss when crossing into an optically denser medium
+        Float  phi12 = ite(film_ior < outside_ior, kPi, 0.0f);
+        Float  phi21 = kPi - phi12;
+        Float3 phi23 = ite(base_ior < film_ior, make_float3(kPi), make_float3(0.0f));
+        Float3 phi   = make_float3(phi21) + phi23;
+
+        Float opd = 2.0f * film_ior * thickness_nm * cos_theta2;
+
+        // Analytic spectral integration: DC term (m = 0) + two Dirac pairs
+        Float3 R123 = clamp(R12 * R23, make_float3(1e-5f), make_float3(0.9999f));
+        Float3 r123 = sqrt(R123);
+        Float3 Rs   = sqr(T121) * R23 / (make_float3(1.0f) - R123);
+
+        Float3 I  = R12 + Rs;    // m = 0
+        Float3 Cm = Rs - T121;
+        Cm *= r123;              // m = 1
+        I += Cm * 2.0f * eval_iridescence_sensitivity(opd, phi);
+        Cm *= r123;              // m = 2
+        I += Cm * 2.0f * eval_iridescence_sensitivity(2.0f * opd, 2.0f * phi);
+
+        Float3 F = max(I, make_float3(0.0f));
+        return ite(sin2_theta2 > 1.0f, make_float3(1.0f), F);   // TIR -> white
+    };
+    return impl(cos_theta1, outside_ior, film_ior, thickness_nm, base_f0);
+}
+
+#endif
+
 Float3 fresnel_conductor(
     Expr<float> c_i, Expr<float3> eta_in, Expr<float3> k_in) noexcept {
     static Callable impl = [](Float c_i, Float3 eta, Float3 k) noexcept {
@@ -372,6 +466,9 @@ Float3 MicrofacetBSDF::evaluate(
         //   Conductor (legacy or toggle OFF): F0 = albedo, Schlick approximation
         //   Dielectric: F0 from IOR (scalar, monochromatic)
         Float3 F = def(make_float3(0.0f));
+        // Normal-incidence F0 of the substrate — drives the film->substrate
+        // interface in eval_iridescence_fresnel below.
+        Float3 base_f0 = def(make_float3(0.04f));
         $if(metallic > 0.5f) {
             // k != 0 is the per-material sentinel for complex-IOR mode. Legacy
             // conductors (k=0) fall through to Schlick; the FrComplex math would
@@ -381,24 +478,36 @@ Float3 MicrofacetBSDF::evaluate(
                 // Complex-IOR Fresnel — attenuation holds eta_re (overloaded storage)
                 Float cos_wh = abs_dot(wi_local, wh);
                 F = fresnel_conductor(cos_wh, conductor_eta, conductor_k);
+                // base_f0 = |(eta + ik) - 1|^2 / |(eta + ik) + 1|^2 per channel
+                base_f0 = (sqr(conductor_eta - 1.0f) + sqr(conductor_k)) /
+                          (sqr(conductor_eta + 1.0f) + sqr(conductor_k));
             }
             $else {
                 // Legacy Schlick — albedo is F0, F = albedo + (1-albedo)*(1-cos)^5
                 auto pow5 = [](auto&& v) { return sqr(sqr(v)) * v; };
                 Float3 one_minus_cos5 = make_float3(pow5(max(1.0f - abs_dot(wi_local, wh), 0.0f)));
                 F = albedo + (1.0f - albedo) * one_minus_cos5;
+                base_f0 = albedo;
             };
         }
         $else {
             // Dielectric: exact Fresnel (scalar, applied to all channels)
             F = make_float3(fresnel_dielectric(abs_dot(wi_local, wh), 1.0f, ior));
+            base_f0 = make_float3(sqr((ior - 1.0f) / (ior + 1.0f)));
         };
 
         // Iridescence: replace base Fresnel with thin-film interference
         $if(iridescence > 0.0f & iridescence_thickness > 0.0f) {
             Float cos_theta_d = abs_dot(wi_local, wh);
+#if NT_ENABLE_BELCOUR_IRIDESCENCE
+            // Belcour-Barla 2017 (KHR reference): substrate-aware two-interface
+            // thin film, analytically integrated to RGB via Gaussian-fit CIE curves.
+            Float3 F_thin = eval_iridescence_fresnel(
+                cos_theta_d, 1.0f, iridescence_ior, iridescence_thickness, base_f0);
+#else
             Float3 F_thin = eval_thin_film_iridescence(
                 cos_theta_d, iridescence_ior, iridescence_thickness);
+#endif
             F = F * (1.0f - iridescence) + F_thin * iridescence;
         };
 
@@ -568,8 +677,11 @@ Float3 ClearcoatBSDF::evaluate(
         // was introduced for on the main specular.
         Float2 alpha_cc = roughness_to_alpha(make_float2(roughness_cc));
 
-        // Schlick Fresnel with fixed IOR=1.5 → R0 = 0.04
-        constexpr float R0 = 0.04f;
+        // Schlick Fresnel from the coat IOR: R0 = ((n-1)/(n+1))^2.
+        // At the Disney default 1.5 this is float-exact 0.04f (0.5/2.5 rounds
+        // to 0.2f; 0.2f^2 rounds back to 0x3D23D70A == 0.04f), so legacy
+        // scenes stay bit-identical.
+        Float R0 = sqr((coat_ior - 1.0f) / (coat_ior + 1.0f));
         auto pow5 = [](auto&& v) { return sqr(sqr(v)) * v; };
         Float F_cc = R0 + (1.0f - R0) * pow5(1.0f - cos_theta_d);
 
@@ -907,14 +1019,11 @@ Float ThinDielectricBSDF::pdf(
 // Material BSDF (Combined)
 //==============================================================================
 
-// Population of MaterialBSDF::lobe_list from bsdf_type + Disney params.
-// See plan piped-discovering-walrus.md §Per-material-type emission.
-//
-// Slot assignments use compile-time indices (0..kMaxLobes-1); RHS values are
-// runtime DSL expressions computed from bsdf_type and the Disney param fields.
-// Host-side loop with compile-time `i` is used for the initial all-null reset.
-//
-// Per-type emission:
+// Standard-layout LobeList as a pure expression DAG — no local variables,
+// no stores (see plan piped-discovering-walrus.md §Per-material-type emission).
+// Slot assignments identical to the former build_lobe_list_for_layer writes;
+// the old reset-then-$if(!is_delta) pattern became per-slot ite selects of
+// the same values, so results are bit-identical:
 //   ThinDielectric (11) / Dielectric (3): single DeltaDielectric lobe, count=1
 //   Everything else (incl. bsdf_type=0 placeholder used by inline
 //   constructions in Shading.h/GIShading.h): standard layered, count=7 —
@@ -926,118 +1035,68 @@ Float ThinDielectricBSDF::pdf(
 //     slot 5: Sheen (Charlie, 0.25) w = 0.25*(1-m)*sheen — sampling pool
 //             under NT_ENABLE_SHEEN_SAMPLING; budget (1-w5) off slots 1-3
 //     slot 6: Clearcoat (add.) w = 0.25*clearcoat
+// Slots 7-9 stay at the null reset defaults (pack(Diffuse,0), weight 0).
 // Sampling-pool weights (slots 0-4) sum to <= 1 by construction (the sheen
 // budget removes w5 from the diffuse family, so diffuse-family + sheen stays
 // energy-bounded even before the lobe's own G term).
 //
 // NOTE: Unlit (12) / Emissive (5) / Null (0) are NOT special-cased here —
-// they fall through to standard layered. The plan called for empty lists but
-// the current engine routes them through standard layered (the OLD $else
-// branch in evaluate/pdf/sample). Matching that behavior in Phase 1; can be
-// refined in Phase 2.
-void build_lobe_list_for_layer(MaterialBSDF const& bsdf, LobeList& lobe_list) noexcept {
+// they fall through to standard layered (legacy behavior, see Phase 1 plan).
+LobeList build_standard_lobe_list(
+    Expr<float> metallic,
+    Expr<float> specular_trans,
+    Expr<float> flatness,
+    Expr<float> sheen,
+    Expr<float> fabric,
+    Expr<float> clearcoat,
+    Expr<uint> bsdf_type) noexcept {
     using UL = LobeType;
 
-    // --- Reset: all slots null (preserve DeltaDielectric slot-0 flags below) ---
-    // We zero both the type and the flags here, then re-set per slot. The
-    // DeltaDielectric path sets slot 0's flags to
-    // (kLobeIsReflection | kLobeIsTransmission) which are still consumed by
-    // evaluate_split's delta routing — do NOT blanket-clear flags anywhere else.
-    for (uint i = 0u; i < LobeList::kMaxLobes; ++i) {
-        lobe_list.type_flags[i] = pack_lobe(static_cast<uint>(UL::Diffuse), 0u);
-        lobe_list.weights[i]    = 0.f;
-    }
-
     // --- Disney canonical weights (standard-layered path) ---
-    Float one_minus_metallic   = 1.f - bsdf.metallic;
-    Float one_minus_spec_trans = 1.f - bsdf.specular_trans_val;
-    Float one_minus_flat       = 1.f - bsdf.flatness_val;
+    auto one_minus_metallic   = 1.f - metallic;
+    auto one_minus_spec_trans = 1.f - specular_trans;
+    auto one_minus_flat       = 1.f - flatness;
     // Sheen weight: Disney 0.25 scale (same convention as the coat slot). The
     // same fraction is taken out of the diffuse-family budget below so the
     // additive Charlie lobe cannot push total reflectance past 1.
-    Float sheen_w              = 0.25f * one_minus_metallic * bsdf.sheen_val;
-    Float one_minus_sheen      = 1.f - sheen_w;
-    Float diffuse_pool_budget  = one_minus_metallic * one_minus_spec_trans * one_minus_flat
-                               * one_minus_sheen;
+    auto sheen_w              = 0.25f * one_minus_metallic * sheen;
+    auto one_minus_sheen      = 1.f - sheen_w;
+    auto diffuse_pool_budget  = one_minus_metallic * one_minus_spec_trans * one_minus_flat
+                              * one_minus_sheen;
 
     // --- Slot 0 + count: depends on bsdf_type ---
-    UInt  s0_type   = def(static_cast<uint>(UL::SpecularMetal));
-    Float s0_weight = def(bsdf.metallic);
-    UInt  s0_flags  = def(kLobeIsReflection);
-    UInt  count_val = def(7u);
+    auto is_delta   = (bsdf_type == 11u) | (bsdf_type == 3u);
+    auto tf0 = ite(is_delta,
+        pack_lobe(static_cast<uint>(UL::DeltaDielectric),
+                  kLobeIsReflection | kLobeIsTransmission),
+        pack_lobe(static_cast<uint>(UL::SpecularMetal), kLobeIsReflection));
+    auto w0  = ite(is_delta, 1.f, metallic);
 
-    // Delta-only fast path (Phase 2F): for Dielectric/ThinDielectric, only
-    // slot 0 is read by downstream paths (gated by count==1). Skip writes to
-    // slots 1-6 — they're guaranteed-zero from the reset above. Saves BW.
-    Bool is_delta = (bsdf.bsdf_type == 11u) | (bsdf.bsdf_type == 3u);
-    $if(is_delta) {
-        s0_type   = static_cast<uint>(UL::DeltaDielectric);
-        s0_weight = 1.f;
-        s0_flags  = kLobeIsReflection | kLobeIsTransmission;
-        count_val = 1u;
-    };
+    // --- Slots 1-6: standard-layered lobes; zero on the delta-only path
+    // (same values the old reset + $if(!is_delta) writes produced) ---
+    auto not_delta = !is_delta;
+    auto tf1 = pack_lobe(static_cast<uint>(UL::Diffuse), kLobeIsReflection);
+    auto w1  = ite(not_delta, diffuse_pool_budget * (1.f - fabric), 0.f);
+    auto tf2 = pack_lobe(static_cast<uint>(UL::Fabric), kLobeIsReflection);
+    auto w2  = ite(not_delta, diffuse_pool_budget * fabric, 0.f);
+    auto tf3 = pack_lobe(static_cast<uint>(UL::Subsurface), kLobeIsReflection);
+    auto w3  = ite(not_delta,
+        one_minus_metallic * one_minus_spec_trans * flatness * one_minus_sheen, 0.f);
+    auto tf4 = pack_lobe(static_cast<uint>(UL::Transmission), kLobeIsTransmission);
+    auto w4  = ite(not_delta, one_minus_metallic * specular_trans, 0.f);
+    auto tf5 = pack_lobe(static_cast<uint>(UL::Sheen), kLobeIsReflection);
+    auto w5  = ite(not_delta, sheen_w, 0.f);
+    auto tf6 = pack_lobe(static_cast<uint>(UL::Clearcoat),
+                         kLobeIsAdditive | kLobeIsReflection);
+    auto w6  = ite(not_delta, 0.25f * clearcoat, 0.f);
 
-    lobe_list.type_flags[0] = pack_lobe(s0_type, s0_flags);
-    lobe_list.weights[0]    = s0_weight;
+    // --- Slots 7-9: null reset defaults ---
+    auto tf_null = pack_lobe(static_cast<uint>(UL::Diffuse), 0u);
 
-    // --- Slots 1-6: standard-layered lobes (skipped on delta-only path) ---
-    // SSS flag bit narrowed in Phase 2E: transmission bit was dead (routing is
-    // hard-coded per slot in evaluate_split). kLobeIsTransmission stays
-    // defined for the DeltaDielectric delta path; not set on SSS anymore.
-    $if(!is_delta) {
-        lobe_list.type_flags[1] = pack_lobe(static_cast<uint>(UL::Diffuse), kLobeIsReflection);
-        lobe_list.weights[1]    = diffuse_pool_budget * (1.f - bsdf.fabric_val);
-
-        lobe_list.type_flags[2] = pack_lobe(static_cast<uint>(UL::Fabric), kLobeIsReflection);
-        lobe_list.weights[2]    = diffuse_pool_budget * bsdf.fabric_val;
-
-        lobe_list.type_flags[3] = pack_lobe(static_cast<uint>(UL::Subsurface), kLobeIsReflection);
-        lobe_list.weights[3]    = one_minus_metallic * one_minus_spec_trans * bsdf.flatness_val
-                                * one_minus_sheen;
-
-        // Phase 2B: Transmission lobe properly wired in evaluate/sample/pdf.
-        // Discarded is_tx out-param — existing TIR pdf math at BSDF.cpp:1727
-        // already handles total internal reflection via F*pdf_r + (1-F)*pdf_t
-        // mixture (pdf_t evaluates to 0 for same-hemisphere wi).
-        lobe_list.type_flags[4] = pack_lobe(static_cast<uint>(UL::Transmission), kLobeIsTransmission);
-        lobe_list.weights[4]    = one_minus_metallic * bsdf.specular_trans_val;
-
-        lobe_list.type_flags[5] = pack_lobe(static_cast<uint>(UL::Sheen),
-                                            kLobeIsReflection);
-        lobe_list.weights[5]    = sheen_w;
-
-        lobe_list.type_flags[6] = pack_lobe(static_cast<uint>(UL::Clearcoat),
-                                            kLobeIsAdditive | kLobeIsReflection);
-        lobe_list.weights[6]    = 0.25f * bsdf.clearcoat_val;
-    };
-
-    lobe_list.count = count_val;
-}
-
-void MaterialBSDF::precompute_tangent_rotation(
-    Expr<luisa::float3> normal) noexcept {
-    // Item 10 hoist: identical expression to the former per-evaluate
-    // computation, so results are bit-identical for any construction site
-    // that passes the same normal its evaluate entry points receive.
-    Float3 bitangent = cross(normal, tangent_dir) * bitangent_sign;
-    Float cos_r = cos(anisotropic_rot_val);
-    Float sin_r = sin(anisotropic_rot_val);
-    t_rot_val = normalize(tangent_dir * cos_r + bitangent * sin_r);
-}
-
-void MaterialBSDF::build_lobe_list() noexcept {
-    // thin wrapper around the free function so Phase 2D's
-    // resolve_surface_layered can build a LobeList for an arbitrary
-    // per-layer MaterialBSDF without going through the member function.
-    build_lobe_list_for_layer(*this, lobe_list);
-    // build_lobe_list_for_layer writes the *standard-layered* (count==7 or 1)
-    // layout into lobe_list. If this MaterialBSDF previously held a composed
-    // list (has_composed_lobe_list==true, e.g. via copy-then-rebuild in the
-    // GI FinalShading MIS path at PipelineInit.cpp:1427), the composed flag
-    // must be cleared — otherwise evaluate/evaluate_split/sample/pdf would
-    // route through the composed (9-slot) path against a standard-layered
-    // lobe_list, reading type_flags/weights at the wrong slot indices.
-    has_composed_lobe_list = false;
+    return LobeList{
+        {w0, w1, w2, w3, w4, w5, w6, 0.f, 0.f, 0.f},
+        {tf0, tf1, tf2, tf3, tf4, tf5, tf6, tf_null, tf_null, tf_null},
+        ite(is_delta, 1u, 7u)};
 }
 
 Float3 MaterialBSDF::evaluate(
@@ -1079,10 +1138,12 @@ Float3 MaterialBSDF::evaluate(
         #endif
 
         // Slot 0: coat. Clearcoat (coat_bsdf_type == 7) uses ClearcoatBSDF with
-        // internal Schlick at IOR 1.5 (legacy behavior). Dielectric (coat_bsdf_type
-        // == 3) uses MicrofacetBSDF with the coat's own ior + roughness for proper
+        // Schlick at the coat's ior. Dielectric (coat_bsdf_type == 3) uses
+        // MicrofacetBSDF with the coat's own ior + roughness for proper
         // F12-weighted reflection — gated by NT_ENABLE_TWO_INTERFACE_FRESNEL.
         // strength=1.0 for Clearcoat since weights[0] already carries the product.
+        // Both evaluate at coat_normal (the coat's own normal map; = normal
+        // when the coat has none).
         $if(lobe_list.weights[0] > 0.f) {
             #if NT_ENABLE_TWO_INTERFACE_FRESNEL
             $if(coat_bsdf_type == 3u) {
@@ -1092,14 +1153,14 @@ Float3 MaterialBSDF::evaluate(
                     0.f, 1.3f, 0.f,
                     tangent_dir, bitangent_sign,
                     attenuation_val, conductor_k_val};
-                f += lobe_list.weights[0] * coat_microfacet.evaluate(wo, wi, normal);
+                f += lobe_list.weights[0] * coat_microfacet.evaluate(wo, wi, coat_normal);
             } $else {
-                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-                f += lobe_list.weights[0] * cc.evaluate(wo, wi, normal);
+                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+                f += lobe_list.weights[0] * cc.evaluate(wo, wi, coat_normal);
             };
             #else
-            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-            f += lobe_list.weights[0] * cc.evaluate(wo, wi, normal);
+            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+            f += lobe_list.weights[0] * cc.evaluate(wo, wi, coat_normal);
             #endif
         };
 
@@ -1193,9 +1254,12 @@ Float3 MaterialBSDF::evaluate(
 
         // Slot 7: Clearcoat (additive — base's own). strength=1.0 for the same
         // reason as slot 0; weights[7] = 0.25 * base.clearcoat_val (set in
-        // build_lobe_list_for_layer).
+        // build_lobe_list_for_layer). IOR stays Disney's fixed 1.5 — the
+        // base's `ior` field is the base surface's, not the coat's, and no
+        // separate base-coat IOR parameter exists (coat_bsdf_type layers
+        // carry their own).
         $if(lobe_list.weights[7] > 0.f) {
-            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val};
+            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val, 1.5f};
             f += lobe_list.weights[7] * cc.evaluate(wo, wi, normal);
         };
 
@@ -1301,7 +1365,7 @@ Float3 MaterialBSDF::evaluate(
             // Slot 6: Clearcoat (additive). strength=1.0 — weights[6] already
             // carries 0.25 * clearcoat_val from build_lobe_list_for_layer.
             $if(lobe_list.weights[6] > 0.f) {
-                ClearcoatBSDF cc{1.0f, clearcoat_gloss_val};
+                ClearcoatBSDF cc{1.0f, clearcoat_gloss_val, 1.5f};
                 f += lobe_list.weights[6] * cc.evaluate(wo, wi, normal);
             };
         };
@@ -1354,6 +1418,8 @@ void MaterialBSDF::evaluate_split(
 
         // Slot 0: coat → specular. Dielectric coat uses MicrofacetBSDF (gated by
         // NT_ENABLE_TWO_INTERFACE_FRESNEL); Clearcoat uses ClearcoatBSDF.
+        // Evaluated at coat_normal (the coat's own normal map; = normal when
+        // the coat has none).
         $if(lobe_list.weights[0] > 0.f) {
             #if NT_ENABLE_TWO_INTERFACE_FRESNEL
             $if(coat_bsdf_type == 3u) {
@@ -1363,14 +1429,14 @@ void MaterialBSDF::evaluate_split(
                     0.f, 1.3f, 0.f,
                     tangent_dir, bitangent_sign,
                     attenuation_val, conductor_k_val};
-                out_specular += lobe_list.weights[0] * coat_microfacet.evaluate(wo, wi, normal);
+                out_specular += lobe_list.weights[0] * coat_microfacet.evaluate(wo, wi, coat_normal);
             } $else {
-                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-                out_specular += lobe_list.weights[0] * cc.evaluate(wo, wi, normal);
+                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+                out_specular += lobe_list.weights[0] * cc.evaluate(wo, wi, coat_normal);
             };
             #else
-            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-            out_specular += lobe_list.weights[0] * cc.evaluate(wo, wi, normal);
+            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+            out_specular += lobe_list.weights[0] * cc.evaluate(wo, wi, coat_normal);
             #endif
         };
 
@@ -1464,7 +1530,7 @@ void MaterialBSDF::evaluate_split(
 
         // Slot 7: Clearcoat (base additive) → specular. strength=1.0.
         $if(lobe_list.weights[7] > 0.f) {
-            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val};
+            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val, 1.5f};
             out_specular += lobe_list.weights[7] * cc.evaluate(wo, wi, normal);
         };
 
@@ -1568,7 +1634,7 @@ void MaterialBSDF::evaluate_split(
 
         // Slot 6: Clearcoat → specular channel. strength=1.0.
         $if(lobe_list.weights[6] > 0.f) {
-            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val};
+            ClearcoatBSDF cc{1.0f, clearcoat_gloss_val, 1.5f};
             out_specular += lobe_list.weights[6] * cc.evaluate(wo, wi, normal);
         };
         };
@@ -1721,7 +1787,8 @@ Float3 MaterialBSDF::sample(
         // Sample dispatch
         Float lobe_pdf_sink = def(0.f);
 #if NT_ENABLE_COAT_SAMPLING
-        // Slot 0: coat — same dual dispatch as evaluate()'s slot 0
+        // Slot 0: coat — same dual dispatch as evaluate()'s slot 0, sampled
+        // about coat_normal (the coat's own normal map; = normal when none).
         $if(chosen == 0u) {
             #if NT_ENABLE_TWO_INTERFACE_FRESNEL
             $if(coat_bsdf_type == 3u) {
@@ -1731,14 +1798,14 @@ Float3 MaterialBSDF::sample(
                     0.f, 1.3f, 0.f,
                     tangent_dir, bitangent_sign,
                     attenuation_val, conductor_k_val};
-                wi = coat_microfacet.sample(wo, normal, u_local, lobe_pdf_sink);
+                wi = coat_microfacet.sample(wo, coat_normal, u_local, lobe_pdf_sink);
             } $else {
-                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-                wi = cc.sample(wo, normal, u_local, lobe_pdf_sink);
+                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+                wi = cc.sample(wo, coat_normal, u_local, lobe_pdf_sink);
             };
             #else
-            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-            wi = cc.sample(wo, normal, u_local, lobe_pdf_sink);
+            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+            wi = cc.sample(wo, coat_normal, u_local, lobe_pdf_sink);
             #endif
         };
 #endif
@@ -1805,6 +1872,7 @@ Float3 MaterialBSDF::sample(
         // Mixture PDF over pool slots
 #if NT_ENABLE_COAT_SAMPLING
         // Slot 0: coat — keeps f (evaluate slot 0) and p consistent
+        // (evaluated at coat_normal, like evaluate/sample).
         $if(lobe_list.weights[0] > 0.f) {
             #if NT_ENABLE_TWO_INTERFACE_FRESNEL
             $if(coat_bsdf_type == 3u) {
@@ -1814,14 +1882,14 @@ Float3 MaterialBSDF::sample(
                     0.f, 1.3f, 0.f,
                     tangent_dir, bitangent_sign,
                     attenuation_val, conductor_k_val};
-                p += coat_pool_w * coat_microfacet.pdf(wo, wi, normal);
+                p += coat_pool_w * coat_microfacet.pdf(wo, wi, coat_normal);
             } $else {
-                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-                p += coat_pool_w * cc.pdf(wo, wi, normal);
+                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+                p += coat_pool_w * cc.pdf(wo, wi, coat_normal);
             };
             #else
-            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-            p += coat_pool_w * cc.pdf(wo, wi, normal);
+            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+            p += coat_pool_w * cc.pdf(wo, wi, coat_normal);
             #endif
         };
 #endif
@@ -2139,7 +2207,7 @@ Float MaterialBSDF::pdf(
 #endif
 #endif
 
-        // Slot 0: coat
+        // Slot 0: coat (evaluated at coat_normal, like evaluate/sample)
 #if NT_ENABLE_COAT_SAMPLING
         $if(lobe_list.weights[0] > 0.f) {
             #if NT_ENABLE_TWO_INTERFACE_FRESNEL
@@ -2150,14 +2218,14 @@ Float MaterialBSDF::pdf(
                     0.f, 1.3f, 0.f,
                     tangent_dir, bitangent_sign,
                     attenuation_val, conductor_k_val};
-                p += coat_pool_w * coat_microfacet.pdf(wo, wi, normal);
+                p += coat_pool_w * coat_microfacet.pdf(wo, wi, coat_normal);
             } $else {
-                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-                p += coat_pool_w * cc.pdf(wo, wi, normal);
+                ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+                p += coat_pool_w * cc.pdf(wo, wi, coat_normal);
             };
             #else
-            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val};
-            p += coat_pool_w * cc.pdf(wo, wi, normal);
+            ClearcoatBSDF cc{1.0f, coat_clearcoat_gloss_val, coat_ior};
+            p += coat_pool_w * cc.pdf(wo, wi, coat_normal);
             #endif
         };
 #endif
@@ -2363,9 +2431,46 @@ Float3 MicrofacetTransmissionBSDF::sample(
     Expr<float2> u,
     Float& out_pdf,
     Bool& out_is_transmission) const noexcept {
+    // Dispersion-aware path with the feature neutralized (dispersion = 0):
+    // value-identical to the monochromatic body — eta_tx collapses to `eta`
+    // and the tint stays 1. The sink is a local; no caller reads it.
+    Float3 tint_sink = def(make_float3(1.0f));
+    return sample(wo, normal, u, 0.5f, 0.0f,
+                  out_pdf, out_is_transmission, tint_sink);
+}
+
+Float3 MicrofacetTransmissionBSDF::sample(
+    Expr<float3> wo,
+    Expr<float3> normal,
+    Expr<float2> u,
+    Expr<float> u_disp,
+    Expr<float> dispersion,
+    Float& out_pdf,
+    Bool& out_is_transmission,
+    Float3& out_dispersion_tint) const noexcept {
 
     Float3x3 tnb = make_orthonormal_basis(normal);
     Float3 wo_local = transpose(tnb) * wo;
+
+    // Stochastic dispersion pick (KHR_materials_dispersion). The Fresnel
+    // branch split and the reflection lobe below stay at the d-line `ior` /
+    // `eta` members — only the refraction geometry switches to the channel
+    // IOR, so reflection-side p_hat stays RGB-stable. `eta` is a ratio
+    // (eta_i/eta_t): reconstruct the glass-side absolute index, disperse it,
+    // and rebuild the ratio with the same orientation. dispersion <= 0 →
+    // dispersed_ior returns n_d and the ite forces the exact original `eta`.
+#if NT_ENABLE_DISPERSION
+    UInt  channel     = pick_dispersion_channel(u_disp);
+    Bool  disp_on     = dispersion > 0.0f;
+    Float glass_side  = ite(eta < 1.0f, 1.0f / max(eta, 1e-4f), eta);
+    Float glass_side_c = dispersed_ior(glass_side, dispersion, channel);
+    Float eta_tx      = ite(disp_on & (eta < 1.0f), 1.0f / glass_side_c,
+                       ite(disp_on, glass_side_c, eta));
+#else
+    (void)u_disp;
+    (void)dispersion;
+    Float eta_tx = eta;
+#endif
 
     // Sample microfacet normal
     Float3 wh_local = sample_ggx_wh(wo_local, alpha, u);
@@ -2377,16 +2482,16 @@ Float3 MicrofacetTransmissionBSDF::sample(
     Bool is_transmission = def(false);
 
     $if(u.x < F) {
-        // Reflection lobe
+        // Reflection lobe (d-line IOR — dispersion in reflection is negligible)
         wi_local = reflect(-wo_local, wh_local);
         is_transmission = false;
     }
     $else {
-        // Transmission lobe — refract through microfacet
+        // Transmission lobe — refract through microfacet with the channel IOR
         Float cos_i = dot(wo_local, wh_local);
-        Float sin2_t = eta * eta * (1.0f - cos_i * cos_i);
+        Float sin2_t = eta_tx * eta_tx * (1.0f - cos_i * cos_i);
         $if(sin2_t < 1.0f) {
-            wi_local = refract_dir(-wo_local, wh_local, eta);
+            wi_local = refract_dir(-wo_local, wh_local, eta_tx);
             // Make sure wi is on the opposite side from wo
             wi_local = ite(same_hemisphere(wo_local, wi_local), -wi_local, wi_local);
         }
@@ -2406,13 +2511,24 @@ Float3 MicrofacetTransmissionBSDF::sample(
     Float pdf_r = pdf_wh / (4.0f * abs_dot(wo_local, wh_local));
 
     // Transmission PDF: pdf_wh * |wi.wh| * eta^2 / (wo.wh + eta*wi.wh)^2
+    // (eta-Jacobian at the channel ratio — matches the direction above)
     Float dot_wi_wh = abs_dot(wi_local, wh_local);
     Float dot_wo_wh = abs_dot(wo_local, wh_local);
-    Float denom_t = dot_wo_wh + eta * dot_wi_wh;
-    Float pdf_t = pdf_wh * dot_wi_wh * eta * eta / max(denom_t * denom_t, 1e-10f);
+    Float denom_t = dot_wo_wh + eta_tx * dot_wi_wh;
+    Float pdf_t = pdf_wh * dot_wi_wh * eta_tx * eta_tx / max(denom_t * denom_t, 1e-10f);
 
     out_pdf = F * pdf_r + (1.0f - F) * pdf_t;
     out_is_transmission = is_transmission;
+
+#if NT_ENABLE_DISPERSION
+    // 3·e_c on a dispersive transmitted pick; 1 otherwise (reflection / TIR /
+    // dispersion off — value-identical to the monochromatic sample).
+    out_dispersion_tint = ite(is_transmission & disp_on,
+                              dispersion_channel_weight(channel),
+                              make_float3(1.0f));
+#else
+    out_dispersion_tint = make_float3(1.0f);
+#endif
 
     Float3 wi = tnb * wi_local;
     return wi;
@@ -2463,7 +2579,14 @@ Float3 DielectricBSDF::evaluate(
     Expr<float3> wi,
     Expr<float3> normal) const noexcept {
 
-    MicrofacetBSDF reflection{albedo, roughness_to_alpha(make_float2(roughness)), 0.0f, ior};
+    // All 11 fields explicit (view members carry no defaults) — trailing
+    // values are the historical default member initializers.
+    MicrofacetBSDF reflection{
+        albedo, roughness_to_alpha(make_float2(roughness)), 0.0f, ior,
+        0.0f, 1.3f, 0.0f,
+        luisa::compute::make_float3(1.f, 0.f, 0.f), 1.0f,
+        luisa::compute::make_float3(1.f, 1.f, 1.f),
+        luisa::compute::make_float3(0.f, 0.f, 0.f)};
     MicrofacetTransmissionBSDF transmission{albedo, roughness_to_alpha(make_float2(roughness)),
                                              1.0f / ior, ior};
 
@@ -2483,6 +2606,22 @@ Float3 DielectricBSDF::sample(
     MicrofacetTransmissionBSDF bsdf{albedo, roughness_to_alpha(make_float2(roughness)),
                                     1.0f / ior, ior};
     return bsdf.sample(wo, normal, u, out_pdf, out_is_transmission);
+}
+
+Float3 DielectricBSDF::sample(
+    Expr<float3> wo,
+    Expr<float3> normal,
+    Expr<float2> u,
+    Expr<float> u_disp,
+    Expr<float> dispersion,
+    Float& out_pdf,
+    Bool& out_is_transmission,
+    Float3& out_dispersion_tint) const noexcept {
+
+    MicrofacetTransmissionBSDF bsdf{albedo, roughness_to_alpha(make_float2(roughness)),
+                                    1.0f / ior, ior};
+    return bsdf.sample(wo, normal, u, u_disp, dispersion,
+                       out_pdf, out_is_transmission, out_dispersion_tint);
 }
 
 Float DielectricBSDF::pdf(

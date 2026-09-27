@@ -45,7 +45,7 @@ from pathlib import Path
 # vcxproj paths anchor at $(CinderBlocksDir) = $(CinderRoot)\blocks, so a
 # scan/reference mismatch here would produce paths that resolve to a
 # different on-disk tree at build time.
-DEFAULT_CINDER_BLOCKS_DIR = Path(r"C:\Users\barca\Projects\Cinder\blocks")
+DEFAULT_CINDER_BLOCKS_DIR = Path(r"../../Cinder/blocks")
 
 # This engine is Windows-only; platform branches for other OSes are skipped.
 TARGET_OS = "msw"

@@ -27,6 +27,7 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 		ImageFloat				gbuf_depth,
 		ImageUInt				gbuf_vis,
 		ImageFloat				gbuf_bary_motion,
+		ImageFloat				gIn_Tiles,
 		Var<util::CameraData>	camera,
 		BufferVar<luisa::uint4> instance_buffer,
 		BufferVar<luisa::float4x4> instance_transform_buffer,
@@ -35,7 +36,7 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 		BindlessVar				tex_bindless
 #if NT_ENABLE_PROCEDURAL
 		, BindlessVar proc_bindless
-	#endif
+#endif
 		) noexcept {
 		set_block_size(16u, 16u, 1u);
 		set_name("denoise_pre_filter");
@@ -44,6 +45,19 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 
 		// Guard against partial-block threads
 		$if(any(coord >= resolution)) { $return(); };
+
+		// Sky-tile early out (perf R2 item 9): a 16x16 block is exactly one
+		// classification tile, so the test is block-uniform. Writes the exact
+		// sentinel values the inst_id == ~0u path below produces (albedo 0 /
+		// has_emission 1, identity spec factor, matID 255 normal) so every
+		// downstream gate sees identical data while the vis read and the full
+		// surface resolve are skipped for all-sky tiles.
+		$if(Expr{ gIn_Tiles.read(coord >> 4u).x != 0.0f }) {
+			albedo_output.write(coord, make_float4(0.0f, 0.0f, 0.0f, 1.0f));
+			spec_factor_output.write(coord, make_float4(1.0f, 1.0f, 1.0f, 0.0f));
+			normal_output.write(coord, make_float4(0.0f, 0.0f, 1.0f, 255.0f));
+			$return();
+		};
 
 		//Float  depth = gbuf_depth.read(coord).x;
 		UInt4  vis = gbuf_vis.read(coord);
@@ -160,7 +174,8 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 					material_buffer, wo,
 					instance_transform_buffer.read(inst_id),
 					0.0f, Expr{ (make_float2(coord) + 0.5f) / make_float2(resolution) },
-					resolution.x, resolution.y);
+										resolution.x, resolution.y, inst_id);
+				reclass_blend_rolled_opaque(surface, isGlassPixel);
 
 				normal = surface.ns;
 
@@ -203,7 +218,7 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 	_relaxClassifyTiles = device.compile<2>([&](
 		ImageFloat tile_output,
 		ImageFloat gIn_ViewZ,
-		BufferVar<RelaxConstants> consts
+		Float denoisingRange
 		) noexcept {
 		set_block_size(8u, 4u, 1u);
 		set_name("classify_tiles");
@@ -212,17 +227,8 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 		UInt2 tilePos = block_id().xy();
 		UInt  threadIdx = thread_id().x + thread_id().y * 8u;
 
-		Shared<uint> s_isSky(1u);
-
-		$if(threadIdx == 0u) {
-			s_isSky.write(0u, 0u);
-		};
-		sync_block();
-
 		UInt2 pixelPos = tilePos * 16u + make_uint2(threadPos.x * 2u, threadPos.y * 4u);
 		UInt  isSky = def(0u);
-
-		Float denoisingRange = consts.read(0u).gDenoisingRange;
 
 		$for(i, 2u) {
 			$for(j, 4u) {
@@ -233,11 +239,15 @@ void RelaxDenoiser::compilePrefilterAndClassifyTiles(Device& device, const Surfa
 			};
 		};
 
-		s_isSky.atomic(0u).fetch_add(isSky);
-		sync_block();
+		// R3 wave/smem pass: the 8x4 block is exactly one 32-lane warp, so a
+		// warp collective replaces the former Shared<uint> accumulator, its
+		// per-thread shared atomics and both sync_block barriers (lc_optimize
+		// §4.2: single-warp reductions belong on warp collectives). Integer
+		// sum — the == 256 test result is bit-identical to the atomic version.
+		UInt totalSky = warp_active_sum(isSky);
 
 		$if(threadIdx == 0u) {
-			Float result = ite(s_isSky.read(0u) == 256u, 1.0f, 0.0f);
+			Float result = ite(totalSky == 256u, 1.0f, 0.0f);
 			tile_output.write(tilePos, make_float4(result, 0.0f, 0.0f, 0.0f));
 		};
 	});
